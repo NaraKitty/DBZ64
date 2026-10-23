@@ -27,6 +27,10 @@ TLB ?= 1
 ifeq ($(TLB),1)
 MODE_FLAGS := -DGBA_TLB
 endif
+# USE_RDP=1: draw with the RDP renderer (platform/n64/render)
+ifdef USE_RDP
+MODE_FLAGS += -DUSE_RDP
+endif
 
 CFLAGS += $(MODE_FLAGS) -I$(REPO)/runtime -I$(REPO)/platform/n64 -I$(REPO)/platform/n64/render -I$(GEN) \
           -fno-strict-aliasing -Wno-error=format

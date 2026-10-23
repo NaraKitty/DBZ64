@@ -54,6 +54,7 @@ typedef struct { int from, to; uint16_t keys; } keyspan_t;
 
 static struct {
     int active;
+    int nodraw;          /* skip drawing except on shot frames (fast runs) */
     int frames;
     int shots[64], nshots;
     keyspan_t spans[256];
@@ -90,6 +91,8 @@ static void load_test_script(void) {
         char k[96];
         if (sscanf(line, "frames %d", &a) == 1) {
             test.frames = a;
+        } else if (!strncmp(line, "nodraw", 6)) {
+            test.nodraw = 1;
         } else if (sscanf(line, "shot %d", &a) == 1) {
             if (test.nshots < 64)
                 test.shots[test.nshots++] = a;
@@ -253,6 +256,26 @@ static void draw_frame_cpu(surface_t *disp) {
     }
 }
 
+#ifdef USE_RDP
+#include "gba_render.h"
+
+/* RDP renderer: enqueue the frame; the RDP finishes it while the game runs
+ * the next frame.  Returns after the frame is queued for display. */
+static void draw_frame_rdp(surface_t *disp, int dump) {
+    gba_view_t view;
+    gba_render_view_native(&view);
+    rdpq_attach(disp, NULL);
+    gba_render_frame(disp, &view);
+    if (dump) {
+        rdpq_detach_wait();
+        fb_dump(frame, disp);
+        display_show(disp);
+    } else {
+        rdpq_detach_show();
+    }
+}
+#endif
+
 /* ------------------------------------------------------------ frame */
 
 static uint64_t t_last;
@@ -279,15 +302,27 @@ void plat_frame(void) {
     uint64_t t1 = get_ticks();
     surface_t *disp = display_get();
     uint64_t t2 = get_ticks();
-    draw_frame_cpu(disp);
+    int shot_now = 0;
+    for (int i = 0; i < test.nshots; i++)
+        if (test.shots[i] == frame)
+            shot_now = 1;
+#ifdef USE_RDP
+    if (!test.nodraw || shot_now) {
+        draw_frame_rdp(disp, test.active && shot_now);
+    } else {
+        display_show(disp);
+    }
     uint64_t t3 = get_ticks();
+#else
+    if (!test.nodraw || shot_now)
+        draw_frame_cpu(disp);
+    uint64_t t3 = get_ticks();
+    if (test.active && shot_now)
+        fb_dump(frame, disp);
+    display_show(disp);
+#endif
     acc_wait += t2 - t1;
     acc_draw += t3 - t2;
-    if (test.active)
-        for (int i = 0; i < test.nshots; i++)
-            if (test.shots[i] == frame)
-                fb_dump(frame, disp);
-    display_show(disp);
 
     audio_flush();
     flush_save();
@@ -342,6 +377,9 @@ int main(void) {
     debug_init_emulog();
     display_init(RESOLUTION_320x240, DEPTH_16_BPP, 3, GAMMA_NONE, FILTERS_DISABLED);
     rdpq_init();
+#ifdef USE_RDP
+    gba_render_init();
+#endif
     joypad_init();
     audio_init(16004, AUDIO_INIT_LATENCY_MS(100));
     dfs_init(DFS_DEFAULT_LOCATION);
