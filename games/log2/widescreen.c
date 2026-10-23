@@ -337,12 +337,22 @@ static const uint16_t *decoded_chunk(uint32_t desc) {
 
 enum { LAYER_NONE, LAYER_FIELD, LAYER_WRAP };
 
+/* How a margin past one edge of a layer's content is filled (see "margins"
+ * below): left blank, mirrored at the edge, or continued with the edge
+ * strip's period (in tiles). */
+enum { EDGE_BLANK, EDGE_MIRROR, EDGE_REPEAT };
+typedef struct {
+    int mode, period;
+} edge_t;
+
 #define RUNS 6
 typedef struct {
     int type;
     uint32_t obj, res;
     int cols, rows;
+    int f1x, f1y;                /* factor-1.0 (map) axes */
     int cx0, cy0, cx1, cy1;      /* clip rect, layer pixels */
+    edge_t ex[2], ey[2];         /* margin fill left/right, top/bottom */
     int h, v;                    /* signed scroll of the shown frame */
     int has_blank;
     uint16_t blank;              /* entry of an all-zero tile */
@@ -404,13 +414,27 @@ static int setup_layer(int bg, uint32_t obj, uint32_t vt) {
      * never visible on the GBA); other factors: the whole chunk grid */
     l->cx0 = 0; l->cx1 = cols * 256;
     l->cy0 = 0; l->cy1 = rows * 256;
-    if (fx == 1024) {
+    l->f1x = fx == 1024;
+    l->f1y = fy == 1024;
+    if (l->f1x) {
         l->cx0 = imax(l->cx0, ox >> 10);
         l->cx1 = imin(l->cx1, (ox >> 10) + map_w());
     }
-    if (fy == 1024) {
+    if (l->f1y) {
         l->cy0 = imax(l->cy0, oy >> 10);
         l->cy1 = imin(l->cy1, (oy >> 10) + map_h());
+    }
+#ifdef WS_TEST_NARROW
+    /* margin fill test (host only): clip the map to the native screen so
+     * the filled margins can be compared with the real map around it */
+    if (l->f1x) { l->cx0 = (l->h + 7) & ~7; l->cx1 = (l->h + 240) & ~7; }
+    if (l->f1y) { l->cy0 = (l->v + 7) & ~7; l->cy1 = (l->v + 160) & ~7; }
+#endif
+    /* parallax axes are mirrored past their chunk grid; map axes get the
+     * map's edge rule (set by update_edges) */
+    for (int s = 0; s < 2; s++) {
+        l->ex[s].mode = l->f1x ? EDGE_BLANK : EDGE_MIRROR;
+        l->ey[s].mode = l->f1y ? EDGE_BLANK : EDGE_MIRROR;
     }
     uint32_t cnt = io16(REG_BG0CNT + 2 * bg);
     l->has_blank = find_blank_tile((int)((cnt >> 2) & 3), (cnt & 0x80) != 0, &l->blank);
@@ -445,18 +469,12 @@ static int detect_field(void) {
     return 1;
 }
 
-static int ws_bg_entry(int bg, int cx, int cy, uint16_t *e) {
-    layer_t *l = &lay[bg & 3];
-    if (l->type != LAYER_FIELD)
+/* the authored entry of layer cell (wx,wy) (layer pixels inside the chunk
+ * grid): from the loaded slot if the layer has that chunk (keeps runtime
+ * map edits), else decoded from ROM */
+static int authored_entry(layer_t *l, int wx, int wy, uint16_t *e) {
+    if (wx < 0 || wy < 0 || wx >= l->cols * 256 || wy >= l->rows * 256)
         return 0;
-    /* world pixel of the cell, from the 16-bit scroll space */
-    int wx = (int16_t)(uint16_t)((uint32_t)cx << 3);
-    int wy = (int16_t)(uint16_t)((uint32_t)cy << 3);
-    /* the hardware ring covers the native screen exactly as the game drew it */
-    if (wx + 8 > l->h && wx < l->h + 240 && wy + 8 > l->v && wy < l->v + 160)
-        return 0;
-    if (wx + 8 <= l->cx0 || wx >= l->cx1 || wy + 8 <= l->cy0 || wy >= l->cy1 || wx < 0 || wy < 0)
-        goto blank;
     int idx = (wy >> 8) * l->cols + (wx >> 8);
     int k;
     for (k = 0; k < RUNS; k++)
@@ -485,11 +503,209 @@ static int ws_bg_entry(int bg, int cx, int cy, uint16_t *e) {
         *e = l->run_dec[k][off];
         return 1;
     }
+    return 0;
+}
+
+/* Source of a margin cell at p (px, 8-aligned relative to the edges) outside
+ * the content [a,b) of one axis, by the rule of the edge it lies past.
+ * Returns 0 for a blank cell; *mirrored toggles for a mirrored source. */
+static int margin_src(int p, int a, int b, const edge_t ed[2], int *src, int *mirrored) {
+    int lo = p < a;
+    const edge_t *r = &ed[lo ? 0 : 1];
+    int k = lo ? (a - 8 - p) >> 3 : (p - b) >> 3;      /* 0 = next to the edge */
+    int t;                                             /* tile inside, from the edge */
+    if ((a & 7) || (b & 7))
+        return 0;
+    if (r->mode == EDGE_MIRROR) {
+        t = k;
+        *mirrored ^= 1;
+    } else if (r->mode == EDGE_REPEAT) {
+        t = r->period - 1 - k % r->period;
+    } else {
+        return 0;
+    }
+    if (t >= (b - a) >> 3)
+        return 0;
+    *src = lo ? a + 8 * t : b - 8 - 8 * t;
+    return 1;
+}
+
+static int ws_bg_entry(int bg, int cx, int cy, uint16_t *e) {
+    layer_t *l = &lay[bg & 3];
+    if (l->type != LAYER_FIELD)
+        return 0;
+    /* world pixel of the cell, from the 16-bit scroll space */
+    int wx = (int16_t)(uint16_t)((uint32_t)cx << 3);
+    int wy = (int16_t)(uint16_t)((uint32_t)cy << 3);
+    /* the hardware ring covers the native screen exactly as the game drew it */
+    if (wx + 8 > l->h && wx < l->h + 240 && wy + 8 > l->v && wy < l->v + 160)
+        return 0;
+    /* past the content: the margin rules of that edge */
+    int hf = 0, vf = 0;
+    if ((wx + 8 <= l->cx0 || wx >= l->cx1) && !margin_src(wx, l->cx0, l->cx1, l->ex, &wx, &hf))
+        goto blank;
+    if ((wy + 8 <= l->cy0 || wy >= l->cy1) && !margin_src(wy, l->cy0, l->cy1, l->ey, &wy, &vf))
+        goto blank;
+    if (authored_entry(l, wx, wy, e)) {
+        *e ^= (uint16_t)((hf ? 0x400 : 0) | (vf ? 0x800 : 0));
+        return 1;
+    }
 blank:
     if (!l->has_blank)
         return 0;
     *e = l->blank;
     return 1;
+}
+
+/* ------------------------------------------------------------ margins */
+
+/* Maps narrower than 320 or shorter than 240 (108 / 27 of them) are centred
+ * in the view, and parallax layers can be smaller than it: the margins show
+ * what the GBA never had to draw.  They are filled from the content itself,
+ * per edge:
+ *  - interiors, whose map edge is black (or empty) along the margin's depth,
+ *    stay blank: there is nothing outside a room;
+ *  - an edge strip that repeats (forest rows, rock, sand: the tile entries
+ *    of every map layer recur with some period P along the inward axis) is
+ *    continued with that period, which is seamless;
+ *  - anything else is mirrored at the edge (tile flips), which is seamless
+ *    too and keeps the trees, rock and water of the edge.
+ * Parallax layers are always mirrored past their chunk grid.  The decision
+ * is made once per map from the authored entries and the tile pixels in
+ * VRAM, and checked again a little later in case the tiles were still
+ * loading; the N64 renderer's caches follow ws_map_generation(). */
+
+static edge_t map_edge[4];          /* left, right, top, bottom */
+static uint32_t edge_age;           /* frames since the map edges were decided */
+
+#define STRIP_ROWS 64
+#define STRIP_COLS 24
+static uint16_t strip[4][STRIP_ROWS][STRIP_COLS];
+
+static inline uint32_t pal16(uint32_t i) {
+    return *(const uint16_t *)((const uint8_t *)gba_mem.pal + ((i * 2) ^ GBA_HX));
+}
+
+/* every pixel of the tile of BG entry e is transparent or black */
+static int tile_dark(int bg, uint32_t e) {
+    uint32_t cnt = io16(REG_BG0CNT + 2 * bg);
+    int bpp8 = (cnt & 0x80) != 0;
+    uint32_t bytes = bpp8 ? 64 : 32;
+    uint32_t a = ((cnt >> 2) & 3) * 0x4000u + (e & 0x3FF) * bytes;
+    if (a + bytes > 0x10000)
+        return 1;
+    const uint8_t *v = (const uint8_t *)gba_mem.vram;
+    for (uint32_t i = 0; i < bytes; i++) {
+        uint32_t b = v[(a + i) ^ GBA_BX];
+        for (int h = 0; h < (bpp8 ? 1 : 2); h++) {
+            uint32_t idx = bpp8 ? b : (b >> (4 * h)) & 15;
+            if (!idx)
+                continue;
+            uint32_t c = pal16(bpp8 ? idx : ((e >> 12) << 4) + idx);
+            if ((c & 31) + ((c >> 5) & 31) + ((c >> 10) & 31) > 6)
+                return 0;
+        }
+    }
+    return 1;
+}
+
+/* the rule for one edge of the map layers: axis 0 = x, side 0 = low;
+ * 'depth' = margin tiles the view can show past it */
+static edge_t decide_edge(int axis, int side, int depth) {
+    edge_t r = { EDGE_BLANK, 0 };
+    int bgs[4], nl = 0, along = 1 << 30, inward = 1 << 30;
+    for (int bg = 0; bg < 4; bg++) {
+        layer_t *l = &lay[bg];
+        if (l->type != LAYER_FIELD || !(axis ? l->f1y : l->f1x))
+            continue;
+        if ((l->cx0 | l->cx1 | l->cy0 | l->cy1) & 7)
+            continue;
+        bgs[nl++] = bg;
+        along = imin(along, axis ? (l->cx1 - l->cx0) >> 3 : (l->cy1 - l->cy0) >> 3);
+        inward = imin(inward, axis ? (l->cy1 - l->cy0) >> 3 : (l->cx1 - l->cx0) >> 3);
+    }
+    if (!nl || depth <= 0 || along <= 0)
+        return r;
+    int cols = imin(inward, STRIP_COLS), rows = imin(along, STRIP_ROWS), step = along / rows;
+    if (depth > cols)
+        return r;
+    for (int i = 0; i < nl; i++) {
+        layer_t *l = &lay[bgs[i]];
+        for (int y = 0; y < rows; y++)
+            for (int j = 0; j < cols; j++) {
+                int u = 8 * y * step;                      /* along the edge */
+                int t = side ? -8 - 8 * j : 8 * j;         /* inward from it */
+                int px = axis ? l->cx0 + u : (side ? l->cx1 : l->cx0) + t;
+                int py = axis ? (side ? l->cy1 : l->cy0) + t : l->cy0 + u;
+                uint16_t e;
+                strip[i][y][j] = authored_entry(l, px, py, &e) ? e : 0xFFFF;
+            }
+    }
+    /* blank when the edge itself or the strip the margin would copy is at
+     * least half dark (rooms keep a black border a few tiles thick inside
+     * the map: the strip may reach their walls) */
+    int dark = 0, dark_edge = 0;
+    for (int y = 0; y < rows; y++)
+        for (int j = 0; j < depth; j++) {
+            int d = 1;
+            for (int i = 0; i < nl && d; i++)
+                d = strip[i][y][j] == 0xFFFF || tile_dark(bgs[i], strip[i][y][j]);
+            dark += d;
+            if (j == 0)
+                dark_edge += d;
+        }
+    if (2 * dark >= rows * depth || 2 * dark_edge >= rows)
+        return r;
+    /* the shortest period that (nearly) all layers agree on */
+    int best = 0, best_score = 0;
+    for (int P = 2; P <= 16 && P + depth <= cols; P++) {
+        int same = 0;
+        for (int y = 0; y < rows; y++)
+            for (int j = 0; j < depth; j++) {
+                int s = 1;
+                for (int i = 0; i < nl && s; i++)
+                    s = strip[i][y][j] == strip[i][y][j + P];
+                same += s;
+            }
+        if (same > best_score) {
+            best_score = same;
+            best = P;
+        }
+    }
+    if (best && 10 * best_score >= 9 * rows * depth) {
+        r.mode = EDGE_REPEAT;
+        r.period = best;
+    } else {
+        r.mode = EDGE_MIRROR;
+    }
+    return r;
+}
+
+/* decide the map's edges (every field frame: cheap unless due) */
+static void update_edges(int W, int H, int new_map) {
+    if (new_map)
+        edge_age = 0;
+    if (edge_age == 0 || edge_age == 30) {
+        /* margin depth in tiles past each edge, plus one for shake */
+        int mx = W < WS_W ? (WS_W - W + 1) / 2 : 0, my = H < WS_H ? (WS_H - H + 1) / 2 : 0;
+        int dx = (mx + 7) / 8 + 1, dy = (my + 7) / 8 + 1;
+        edge_t e[4] = {
+            decide_edge(0, 0, dx), decide_edge(0, 1, dx),
+            decide_edge(1, 0, dy), decide_edge(1, 1, dy),
+        };
+        if (edge_age && memcmp(e, map_edge, sizeof e))
+            map_generation++;          /* the margins change: renderer caches */
+        memcpy(map_edge, e, sizeof e);
+    }
+    if (edge_age < 1000)
+        edge_age++;
+    for (int bg = 0; bg < 4; bg++) {
+        layer_t *l = &lay[bg];
+        if (l->type != LAYER_FIELD)
+            continue;
+        if (l->f1x) { l->ex[0] = map_edge[0]; l->ex[1] = map_edge[1]; }
+        if (l->f1y) { l->ey[0] = map_edge[2]; l->ey[1] = map_edge[3]; }
+    }
 }
 
 /* ------------------------------------------------------------ sprite tracking */
@@ -549,11 +765,19 @@ static int classify(uint32_t vt, uint32_t cull) {
     return CLS_WORLD;
 }
 
+/* OBJ sizes by shape and size */
+static const uint8_t obj_dim[3][4][2] = {
+    { { 8, 8 }, { 16, 16 }, { 32, 32 }, { 64, 64 } },
+    { { 16, 8 }, { 32, 8 }, { 32, 16 }, { 64, 32 } },
+    { { 8, 16 }, { 8, 32 }, { 16, 32 }, { 32, 64 } },
+};
+
 typedef struct {
     uint32_t obj, vt, cull, emit;
     int32_t x, y;           /* exact screen position (when flagged) */
     uint16_t a0, a1;        /* attributes as emitted (validation) */
     uint8_t has_x, has_y, cls;
+    uint8_t ext;            /* added by the view (banner extension), not by the game */
 } side_t;
 static side_t side_build[128], side_live[128];
 /* slots ever written: everything above is zero in both arrays, so clears
@@ -679,9 +903,104 @@ void ws_hook_emit_end(const uint32_t *regs) {
     }
 }
 
+/* Location banners (vt 0x08024D40) are a row of affine sprites spanning
+ * exactly the native width (7x 32x16 and a 16x16 at y 128; they scale in
+ * and out).  The view extends them to its full width: copies of the
+ * rightmost sprite, which holds only the stripes (every row one colour),
+ * are added on both sides when the shadow OAM is uploaded.  They take free
+ * shadow slots (the overflow guard keeps 16 free while the view is
+ * widened) and share the affine parameters, so they scale with the rest;
+ * the next build clears them. */
+#define VT_BANNER 0x08024D40u
+#define BANNER_EXT 40           /* px added on each side */
+
+static inline void iw16_set(uint32_t a, uint32_t v) {
+    *(uint16_t *)((uint8_t *)gba_mem.iwram + ((a & 0x7FFEu) ^ GBA_HX)) = (uint16_t)v;
+}
+
+/* every row of the sprite (attributes a0/a2, w x h) is a single colour */
+static int obj_rows_plain(uint32_t a0, uint32_t a2, int w, int h) {
+    int bpp8 = (a0 & 0x2000) != 0, map1d = (io16(REG_DISPCNT) & 0x40) != 0;
+    const uint8_t *v = (const uint8_t *)gba_mem.vram;
+    for (int y = 0; y < h; y++) {
+        int first = -1;
+        for (int x = 0; x < w; x++) {
+            uint32_t t = (a2 & 0x3FF) + (uint32_t)(map1d ? (y >> 3) * (w >> 3) * (bpp8 ? 2 : 1) : (y >> 3) * 32)
+                         + (uint32_t)(x >> 3) * (bpp8 ? 2 : 1);
+            uint32_t o = 0x10000u + (t & 0x3FF) * 32u;
+            int px;
+            if (bpp8) {
+                px = v[(o + (uint32_t)((y & 7) * 8 + (x & 7))) ^ GBA_BX];
+            } else {
+                uint32_t b = v[(o + (uint32_t)((y & 7) * 4 + ((x & 7) >> 1))) ^ GBA_BX];
+                px = (int)((x & 1) ? b >> 4 : b & 15);
+            }
+            if (first < 0)
+                first = px;
+            else if (px != first)
+                return 0;
+        }
+    }
+    return 1;
+}
+
+static void extend_banner(void) {
+    int src = -1, minx = 1 << 20, maxx = -(1 << 20), sw = 0;
+    for (int i = 0; i < build_used; i++) {
+        const side_t *s = &side_build[i];
+        if (!s->obj || s->vt != VT_BANNER || s->ext)
+            continue;
+        uint32_t a0 = iw16(SHADOW_OAM + 8u * (uint32_t)i), a1 = iw16(SHADOW_OAM + 8u * (uint32_t)i + 2);
+        if ((a0 & 0x300) == 0x200 || (a0 >> 14) == 3)
+            continue;
+        int w = obj_dim[a0 >> 14][a1 >> 14][0];
+        int x = (int)(a1 & 0x1FF);
+        if (x >= 256)
+            x -= 512;
+        minx = imin(minx, x);
+        if (x + w > maxx) {
+            maxx = x + w;
+            src = i;
+            sw = w;
+        }
+    }
+    if (src < 0 || minx > 0 || maxx < 240)
+        return;
+    uint32_t sa = SHADOW_OAM + 8u * (uint32_t)src;
+    uint32_t a0 = iw16(sa), a1 = iw16(sa + 2), a2 = iw16(sa + 4);
+    if (a0 & 0x200)                         /* double-size affine: skip */
+        return;
+    if (!obj_rows_plain(a0, a2, sw, obj_dim[a0 >> 14][a1 >> 14][1]))
+        return;
+    int slot = build_used;
+    for (int side = 0; side < 2; side++)
+        for (int k = 0; k * sw < BANNER_EXT; k++) {
+            if (slot >= 128)
+                return;
+            int x = side ? maxx + k * sw : minx - (k + 1) * sw;
+            uint32_t a = SHADOW_OAM + 8u * (uint32_t)slot;
+            uint32_t n1 = (a1 & ~0x1FFu) | ((uint32_t)x & 0x1FF);
+            iw16_set(a, a0);
+            iw16_set(a + 2, n1);
+            iw16_set(a + 4, a2);
+            side_t *d = &side_build[slot];
+            *d = side_build[src];
+            d->a1 = (uint16_t)n1;
+            d->x = x;
+            d->has_x = 1;
+            d->ext = 1;
+            slot++;
+            build_used = slot;
+            if (slot > side_hwm)
+                side_hwm = slot;
+        }
+}
+
 /* 0x08006AAE / 0x080070B0: the shadow OAM is copied to OAM */
 void ws_hook_oam_upload(const uint32_t *regs) {
     (void)regs;
+    if (widen_active())
+        extend_banner();
     memcpy(side_live, side_build, (size_t)side_hwm * sizeof(side_t));
     live_valid = 1;
     st.slots_used = build_used;
@@ -690,12 +1009,6 @@ void ws_hook_oam_upload(const uint32_t *regs) {
 }
 
 /* ------------------------------------------------------------ per-frame sprite positions */
-
-static const uint8_t obj_dim[3][4][2] = {
-    { { 8, 8 }, { 16, 16 }, { 32, 32 }, { 64, 64 } },
-    { { 16, 8 }, { 32, 8 }, { 32, 16 }, { 64, 32 } },
-    { { 8, 16 }, { 8, 32 }, { 16, 32 }, { 32, 64 } },
-};
 
 #define HIDDEN (-4096)
 static int16_t pos_x[128], pos_y[128];
@@ -718,7 +1031,7 @@ static int anchor(int p, int size, int native, int view, int inset) {
 static void compute_obj_positions(void) {
     int cls[128], bw[128], bh[128], gx[128], gy[128];
     uint32_t owner[128];
-    uint8_t hud[128];
+    uint8_t hud[128], ext[128];
     int nscreen = 0, ex = 0, ey = 0;
     for (int i = 0; i < 128; i++) {
         pos_ok[i] = 0;
@@ -753,6 +1066,7 @@ static void compute_obj_positions(void) {
         cls[i] = c;
         owner[i] = known ? s->obj : 0;
         hud[i] = known && is_hud(s->vt);
+        ext[i] = known && s->ext;
         gx[i] = x;
         gy[i] = y;
         pos_ok[i] = 1;
@@ -776,7 +1090,7 @@ static void compute_obj_positions(void) {
     int idx[128], n = 0;
     for (int i = 0; i < 128; i++) {
         if (cls[i] != CLS_SCREEN) continue;
-        if (gx[i] + bw[i] <= 0 || gx[i] >= 240 || gy[i] + bh[i] <= 0 || gy[i] >= 160) {
+        if (!ext[i] && (gx[i] + bw[i] <= 0 || gx[i] >= 240 || gy[i] + bh[i] <= 0 || gy[i] >= 160)) {
             pos_x[i] = HIDDEN;            /* parked off-screen */
             pos_y[i] = HIDDEN;
             continue;
@@ -835,6 +1149,163 @@ static int ws_obj_pos(int i, int *x, int *y) {
     return 1;
 }
 
+/* ------------------------------------------------------------ menu view */
+
+/* The pause menu (status, items, options and journal pages) and the file
+ * select share one layout: BG3 is a seamless 256x256 starfield (it scrolls
+ * through its whole ring), BG1/BG2 (and BG0 while pages crossfade) hold
+ * the frame and the page, all 8bpp with screen blocks 28+n, and no field
+ * runs.  These screens are shown at 320x240: the starfield wraps to fill
+ * the view, the page stays centred, and the frame's horizontal rules (the
+ * orange tab line) run on to the screen edges.  A row of a page layer is
+ * continued past the native edges only when, from both edges, the first
+ * tile at most 6 cells in whose every pixel row is one colour (a rule) has
+ * the same rows and is not transparent, and both edge cells show
+ * something; that tile is repeated.  Everything else outside the native frame is
+ * transparent. */
+static int menu_on;
+static uint16_t menu_blank[4];
+static int menu_has_blank[4];
+static uint32_t menu_sig;
+
+static uint16_t hw_entry(int bg, int px, int py);
+
+/* pixel rows of BG bg's tile for entry e: each one colour (*plain, with
+ * the colours of rows 0..7 in *colours: 4 bits each, plus the palette bank
+ * for 4bpp), any pixel not transparent (*opaque) */
+static void bg_tile_rows(int bg, uint32_t e, int *plain, int *opaque, uint64_t *colours) {
+    uint32_t cnt = io16(REG_BG0CNT + 2 * bg);
+    int bpp8 = (cnt & 0x80) != 0;
+    uint32_t bytes = bpp8 ? 64 : 32;
+    uint32_t a = ((cnt >> 2) & 3) * 0x4000u + (e & 0x3FF) * bytes;
+    const uint8_t *v = (const uint8_t *)gba_mem.vram;
+    *plain = a + bytes <= 0x10000;
+    *opaque = 0;
+    *colours = bpp8 ? 0 : (uint64_t)(e >> 12) << 32;
+    if (!*plain)
+        return;
+    for (uint32_t y = 0; y < 8; y++) {
+        uint32_t first = 0;
+        for (uint32_t x = 0; x < 8; x++) {
+            uint32_t idx;
+            if (bpp8) {
+                idx = v[(a + y * 8 + x) ^ GBA_BX];
+            } else {
+                uint32_t b = v[(a + y * 4 + (x >> 1)) ^ GBA_BX];
+                idx = (x & 1) ? b >> 4 : b & 15;
+            }
+            if (idx)
+                *opaque = 1;
+            if (!x)
+                first = idx;
+            else if (idx != first)
+                *plain = 0;
+        }
+        *colours ^= (uint64_t)first << (8 * y);
+    }
+}
+
+static int menu_regs(void) {
+    uint32_t d = io16(REG_DISPCNT);
+    if ((d & 0x87) || (d & 0x0A00) != 0x0A00)        /* mode 0, BG1 and BG3 on */
+        return 0;
+    if (io16(REG_BG0CNT + 2) != 0x1D83 || io16(REG_BG0CNT + 4) != 0x1E83 ||
+        io16(REG_BG0CNT + 6) != 0x1F83)
+        return 0;
+    if ((d & 0x0100) && (io16(REG_BG0CNT) & 0xFF83) != 0x1C83)
+        return 0;
+    return 1;
+}
+
+/* the starfield fills its ring: no empty cell */
+static int menu_starfield(void) {
+    for (int ty = 0; ty < 32; ty++)
+        for (int tx = 0; tx < 32; tx++) {
+            int plain, opaque;
+            uint64_t c;
+            bg_tile_rows(3, hw_entry(3, tx * 8, ty * 8), &plain, &opaque, &c);
+            if (!opaque)
+                return 0;
+        }
+    return 1;
+}
+
+/* the rule tile continuing row 'py' (ring pixels) of BG bg past its left
+ * (side 0) or right edge, with its row colours; 0 if none */
+static int menu_rule(int bg, int h, int py, int side, uint16_t *e, uint64_t *colours) {
+    for (int k = 0; k < 6; k++) {
+        int px = h + (side ? 232 - 8 * k : 8 * k);
+        uint16_t c = hw_entry(bg, px, py);
+        int plain, opaque;
+        bg_tile_rows(bg, c, &plain, &opaque, colours);
+        if (!k && !opaque)
+            return 0;                       /* nothing at the edge */
+        if (plain && opaque) {
+            *e = c;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int menu_bg_entry(int bg, int cx, int cy, uint16_t *e) {
+    bg &= 3;
+    if (bg == 3)
+        return 0;                           /* the starfield wraps */
+    int h = io16(REG_BG0HOFS + 4 * bg) & 0x1FF, v = io16(REG_BG0HOFS + 4 * bg + 2) & 0x1FF;
+    int sx = (int16_t)(uint16_t)((uint32_t)cx << 3) - h;
+    int sy = (int16_t)(uint16_t)((uint32_t)cy << 3) - v;
+    if (sx + 8 > 0 && sx < 240 && sy + 8 > 0 && sy < 160)
+        return 0;
+    /* a rule runs across the whole frame: both edges find the same pixels
+     * (a panel that merely touches one edge is not continued) */
+    uint16_t l, r;
+    uint64_t lc, rc;
+    if (sy >= 0 && sy + 8 <= 160 && !(v & 7) && !(h & 7) &&
+        menu_rule(bg, h, v + sy, 0, &l, &lc) && menu_rule(bg, h, v + sy, 1, &r, &rc) && lc == rc) {
+        *e = sx < 0 ? l : r;
+        return 1;
+    }
+    if (!menu_has_blank[bg])
+        return 0;
+    *e = menu_blank[bg];
+    return 1;
+}
+
+/* entries the menu margins depend on (the edge columns), to tell renderers
+ * that cache margins when they change */
+static uint32_t menu_signature(void) {
+    uint32_t s = io16(REG_DISPCNT);
+    for (int bg = 0; bg < 3; bg++) {
+        int h = io16(REG_BG0HOFS + 4 * bg) & 0x1FF, v = io16(REG_BG0HOFS + 4 * bg + 2) & 0x1FF;
+        s = s * 31u + (uint32_t)(h | v << 9);
+        for (int y = 0; y < 160; y += 8)
+            for (int k = 0; k < 6; k++)
+                s = s * 31u + hw_entry(bg, h + 8 * k, v + y) * 7u + hw_entry(bg, h + 232 - 8 * k, v + y);
+    }
+    return s;
+}
+
+static void update_menu(void) {
+    int on = ws_enabled && !field_on && menu_regs();
+    /* the starfield check reads 64 KB: on entry, then now and then */
+    if (on && (!menu_on || !(vblank_count & 63)))
+        on = menu_starfield();
+    if (on != menu_on)
+        map_generation++;
+    menu_on = on;
+    if (!on)
+        return;
+    for (int bg = 0; bg < 3; bg++) {
+        uint32_t cnt = io16(REG_BG0CNT + 2 * bg);
+        menu_has_blank[bg] = find_blank_tile((int)((cnt >> 2) & 3), (cnt & 0x80) != 0, &menu_blank[bg]);
+    }
+    uint32_t sig = menu_signature();
+    if (sig != menu_sig)
+        map_generation++;
+    menu_sig = sig;
+}
+
 /* ------------------------------------------------------------ frame */
 
 void ws_frame_begin(void) {
@@ -846,6 +1317,7 @@ void ws_frame_begin(void) {
 
     field_on = ws_enabled && detect_field();
     st.field = field_on;
+    update_menu();
     if (!field_on) {
         for (int bg = 0; bg < 4; bg++) lay[bg].type = LAYER_NONE;
         OX = OY = 0;
@@ -857,10 +1329,16 @@ void ws_frame_begin(void) {
     /* a different map (or the field view coming back) invalidates margins
      * a renderer may have cached */
     uint32_t key = iw32(CAM_MAP) ^ ((uint32_t)W << 16) ^ (uint32_t)H;
-    if (key != last_map_key || !last_map_key) {
+    int new_map = key != last_map_key || !last_map_key;
+    if (new_map) {
         last_map_key = key ? key : 1;
         map_generation++;
     }
+#ifdef WS_TEST_NARROW
+    update_edges(240, 160, 1);
+#else
+    update_edges(W, H, new_map);
+#endif
     view_rect(L, T, W, H, &X0, &Y0);
     OX = X0 - L;
     OY = Y0 - T;
@@ -883,6 +1361,16 @@ void ws_native_view(ws_view_t *v) {
 }
 
 void ws_get_view(ws_view_t *v) {
+    if (menu_on) {
+        /* the native frame centred, with the menu margins around it */
+        ws_native_view(v);
+        v->x0 = -40;
+        v->y0 = -40;
+        v->x1 = 280;
+        v->y1 = 200;
+        v->bg_entry = menu_bg_entry;
+        return;
+    }
     if (!field_on) {
         ws_native_view(v);
         return;

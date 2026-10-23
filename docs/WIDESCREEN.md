@@ -3,9 +3,11 @@
 On field maps the N64 shows a real 320x240 window onto the authored world: the
 map is not stretched. Field maps include towns, the overworld, and the real-time
 battles and bosses that run on field maps. The HUD and dialogue are re-anchored
-toward the screen edges. Every other screen (title, menus, status, logos and
-the mode-1 map) shows the native 240x160 frame centred at (40,40) with a black
-border.
+toward the screen edges, and location banners run the full width. Maps smaller
+than the view are continued past their edges (see "Margin fill"). The pause
+menu and the file select fill the view too (see "Menus"). Every other screen
+(title, logos and the mode-1 map) shows the native 240x160 frame centred at
+(40,40) with a black border.
 
 The interface is `runtime/widescreen.h`. The LoG2 code is in
 `games/log2/widescreen.c`, and the hook sites are in `games/log2/game.toml`
@@ -70,9 +72,9 @@ y = T-40 clamped to [0, H-240]   (H < 240: centred)
 x, y clamped so the native 240x160 stays inside;  OX = x-L, OY = y-T
 ```
 
-Shake moves the whole view, as it does natively. On small maps (108 maps are
-narrower than 320, 27 shorter than 240) the map is centred and the backdrop
-shows around it. Gameplay is unchanged.
+Shake moves the whole view, as it does natively. Small maps (108 maps are
+narrower than 320, 27 shorter than 240) are centred, and their margins are
+filled from the map itself (next section). Gameplay is unchanged.
 
 ## Background margins
 
@@ -102,11 +104,50 @@ For a margin cell, `bg_entry`:
 
 Chunk lookups are cached per layer, 6 runs per frame, so a 32-tile run costs one lookup.
 
-Cells outside the clip get an all-zero (transparent) tile. The clip is:
+Cells outside the clip are margin cells (next section). The clip is:
 - **Factor-1.0 axes:** the map rectangle in layer space, `[origin, origin+W)`.
 - **Other axes:** the chunk grid.
 
 Wrap layers (`0x08023C44`) use the hardware ring, which is their authored repeat.
+
+## Margin fill
+
+A margin cell past an edge of the clip takes the authored entry of a cell
+inside, by the rule of that edge (`margin_src`):
+
+| Rule | Source of the k-th cell past the edge (k = 0 next to it) |
+|---|---|
+| blank | the all-zero tile (backdrop or lower layers show) |
+| mirror | the k-th cell inside, with the flip bit of that axis toggled |
+| repeat P | the cell P-1-(k mod P) inside |
+
+Mirroring is seamless at the edge by construction, and keeps whatever the
+edge is made of (trees, rock, sand, water). Corner cells apply both axes.
+
+**Map edges** (factor-1.0 axes) are decided once per map from the authored
+entries of a strip along each edge, as deep as the margin the view can show
+there plus one cell for shake (`decide_edge`, up to 64 positions along the
+edge, all factor-1.0 layers together):
+- **blank** when the outermost cells, or the whole strip, are at least half
+  dark: every layer's tile is transparent or black (`tile_dark`, from VRAM
+  and the palette). Rooms keep a black border inside the map, so interiors
+  stay as they were.
+- **repeat P** when, for some period P from 2 to 16 cells, at least 90% of
+  the strip equals the strip P cells further in, on every layer at once (a
+  regular forest edge).
+- **mirror** otherwise.
+
+The decision is taken again 30 frames into the map, in case the tiles were
+still loading; if it changes, `ws_map_generation()` moves so the N64
+renderer drops cached margins.
+
+**Parallax layers** (factor != 1.0) are mirrored past their chunk grid on
+those axes, so a backdrop one chunk wide reaches the view edges.
+
+The rules were checked by building the host harness with
+`-DWS_TEST_NARROW`, which clips every factor-1.0 layer to the native screen
+of the frame, and comparing the filled margins with the real map around
+them (`D:\dbz-n64\runs\ws_narrow`, outside the repo).
 
 ## Sprites
 
@@ -190,6 +231,43 @@ The class comes from the object's vtable.
 
 The HUD lands in the top-left corner. Dialogue boxes and banners land at bottom-centre, or
 top-centre when the game puts them at the top.
+
+### Location banners
+
+A location banner (`0x08024D40`) is a row of affine sprites, 7 of 32x16 and
+one 16x16 at y 128, covering exactly the native width; the game scales them
+in and out. When the shadow OAM is uploaded (`ws_hook_oam_upload`, only while
+the view is widened), `extend_banner` adds copies of the rightmost sprite,
+16 px wide, 40 px out on each side, so the banner spans the whole 320 px.
+That sprite holds only the stripes: the copies are made only if every pixel
+row of it is one colour. They take free shadow slots (the overflow guard
+keeps 16 free), share the affine parameters so they scale with the rest, are
+flagged in the side table so they are not hidden as off-screen, and are
+cleared by the next build.
+
+## Menus
+
+The pause menu (status, items, options and journal pages) and the file
+select share one layout (`menu_regs`, `menu_starfield`): mode 0 with BG1 and BG3 on, BG1-3
+control `0x1D83`/`0x1E83`/`0x1F83` (BG0 `0x1C83` while pages crossfade), no
+field running, and BG3 a starfield with no empty cell in its 32x32 ring. The
+title screen and logos do not match (BG1 is off there).
+
+The view is the native frame at (40,40) with the region widened to
+`[-40,280) x [-40,200)` and `menu_bg_entry` as the BG hook (sprites keep
+their native place):
+- **BG3**, the starfield, uses the hardware ring. It scrolls through its whole
+  ring on the GBA, so it is seamless and fills the view.
+- **BG0-2** (frame and page) are transparent outside the native frame,
+  except rules: a row is continued when, scanning at most 6 cells in from
+  each native edge, the first tile whose every pixel row is one colour has
+  the same rows on both sides, is not transparent, and both edge cells show
+  something. That tile repeats to the view edge. This continues the orange
+  tab line and nothing else; the page panel touches one edge only and is
+  left alone.
+
+The margins depend on the edge columns, so `ws_map_generation()` moves when
+their entries change (page switches), and on entering and leaving the menu.
 
 ## Culling and despawn (`games/log2/game.toml`)
 
@@ -301,8 +379,12 @@ Results over these runs:
 - **Coverage.** Not reached:
   - battles with many enemies (only the Frieza boss fight)
   - parallax (fx != 1.0) layers. ROM has about 20 of them, including static ones
-    (fx = 0), some only one chunk (256 px) wide. Outside the chunk grid their
-    margins are blank, so a static backdrop would not reach the view edges.
+    (fx = 0), some only one chunk (256 px) wide. Past the chunk grid they are
+    mirrored; that was checked only with the clip test, not on such a map.
+  - the outdoor small maps players reported (the forest clearing, a cave, a
+    cliff path with a sky backdrop, a desert canyon): the explorer runs reach
+    only interiors among the small maps. The margin rules were checked on
+    clipped large maps instead (see "Margin fill").
   - the mode-1 world map
   - beam attacks that use the `0x08014894` emitter (the fix is verified only by code)
 - **Sprite classes.** Sprite classes that never appeared in testing are classified statically:
