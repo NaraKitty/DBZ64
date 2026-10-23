@@ -71,6 +71,8 @@ class FuncGen:
             return 'call'
         if op == 'swi':
             return 'swi'
+        if op == 'msr' and not i.spsr and not (i.mask & 1):
+            return 'normal'          # flags-only write
         if op in ('mrs', 'msr'):
             return 'psr'
         if op == 'b':
@@ -152,61 +154,13 @@ class FuncGen:
         return False
 
     def set_summaries(self, summ):
-        """Liveness with callee summaries (same model as abi.live_in)."""
+        """Per-instruction liveness under the converged callee summaries."""
         self.summ = summ
         key = (self.addr, self.thumb)
         self.MOD = summ.MOD[key]
         self.IN = summ.IN[key]
         unknown = self.MOD == (ALLREGS | FLAGS)
-        exit_use = (ALLREGS | FLAGS) if unknown else self.MOD
-        ins = self.ins
-        use_tab = {}
-        for a in self.addrs:
-            i = ins[a]
-            k = self.kind[a]
-            ce = summ.call_effect(self, i)
-            if ce is not None:
-                cin, cmod = ce
-                u = cin | COND_FLAGS[i.cond]
-                d = cmod
-                if k in ('call', 'ccall'):
-                    u &= ~bit(14)
-                    d |= bit(14)
-                elif k == 'icall':
-                    u |= bit(14)
-            else:
-                u, d = use_def_basic(i)
-            if k in ('tail', 'ctail'):
-                tkey = (i.target, self.thumb) if k == 'tail' else tuple(self.const_branch[a][:2])
-                tin, tmod = summ.callee_summary(tkey)
-                u |= tin | (exit_use & ~tmod) | bit(14)
-            use_tab[a] = (u, d)
-        live = {a: 0 for a in self.addrs}
-        dlive = exit_use | bit(14)
-        order = list(reversed(self.addrs))
-        changed = True
-        while changed:
-            changed = False
-            nd = exit_use | bit(14)
-            for r in self.resume:
-                nd |= live.get(r, 0)
-            if nd != dlive:
-                dlive = nd
-                changed = True
-            for a in order:
-                out = 0
-                for s in self.succ[a]:
-                    out |= dlive if s == 'D' else live[s]
-                u, d = use_tab[a]
-                if ins[a].cond != COND_AL:
-                    n = out | u
-                else:
-                    n = (out & ~d) | u
-                if n != live[a]:
-                    live[a] = n
-                    changed = True
-        self.live = live
-        self.dlive = dlive
+        _, self.live, self.dlive = summ.live_in(self, self.MOD, summ.saved[key], unknown)
         self.synced = 0
 
     def live_out(self, a):
@@ -389,9 +343,9 @@ class FuncGen:
             if tgt is None:
                 body += self.emit_plain(i, pc_target_var='ft2')
                 tgt = 'ft2'
-            body += [self.sync_out(ALLREGS | FLAGS, bit(14)), 'gba_call(%s);' % tgt,
+            body += [self.sync_out(self.summ.ind_in, bit(14)), 'gba_call(%s);' % tgt,
                      'if (unlikely(cpu.next_pc != r14)) goto L_resync;',
-                     self.sync_in(self.live_out(a))]
+                     self.sync_in(self.live_out(a) & self.summ.ind_mod)]
             return self.wrap_cond(i, body)
         if k == 'indirect':
             if op == 'bx':
@@ -500,6 +454,10 @@ class FuncGen:
                 out.append('  n = r%d >> 31; z = m64 == 0;' % i.rdhi)
             out.append('}')
             return out
+        if op == 'msr':
+            val, pre = self.op2(i.op2, i, False)
+            return pre + ['ft = %s; n = ft >> 31; z = (ft >> 30) & 1; c = (ft >> 29) & 1; v = (ft >> 28) & 1;'
+                          % val]
         if op == 'swp':
             if i.msize == 1:
                 out.append('ft = rd8(r%d); wr8(r%d, r%d); r%d = ft;' % (i.rn, i.rn, i.rm, i.rd))
@@ -664,6 +622,8 @@ class FuncGen:
         self.e('  uint32_t r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14;')
         self.e('  uint32_t n, z, c, v, fa, fb, fr, ft, ft2, t;')
         self.e('  const uint32_t ret = cpu.r[14];')
+        if getattr(self, 'warn_entry', False):
+            self.e('  gba_unexpected(%s);' % hx(self.addr | self.T))
         entry_live = self.live[self.addr]
         self.e('  ' + self.sync_in(entry_live))
         unl = [r for r in range(15) if not entry_live & bit(r)]
@@ -770,8 +730,27 @@ def main():
         g = FuncGen(cs, f, keys, {})
         g.build()
         gens[(f['addr'], f['thumb'])] = g
-    summ = Summaries(gens)
+    # Address-taken functions are the possible targets of indirect calls.  The
+    # IRQ code is only entered by the runtime (with a full context save), so it
+    # does not constrain the indirect-call summary.
+    runtime_only = {0x03000824, 0x03000934, 0x03000798, 0x03000950}
+    taken = set()
+    for f in funcs:
+        if f.get('origin') not in ('call', 'tail', 'reset', None) and f['addr'] not in runtime_only:
+            taken.add((f['addr'], f['thumb']))
+    import tomllib
+    cfg = tomllib.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'game.toml'), 'rb'))
+    noreturn = {(e['addr'], e.get('mode', 'thumb') == 'thumb') for e in cfg.get('noreturn', [])}
+    unreachable = {(e['addr'], e.get('mode', 'thumb') == 'thumb') for e in cfg.get('assume_unreachable', [])}
+    noreturn |= unreachable
+    taken -= noreturn
+    summ = Summaries(gens, taken, noreturn)
     iters = summ.run()
+    print('indirect-call summary: IN=%05x MOD=%05x (widened in %d rounds)'
+          % (summ.ind_in, summ.ind_mod, summ.widened))
+    for k, kin, kmod in getattr(summ, 'nonconforming', [])[:20]:
+        print('  non-conforming address-taken function %s IN=%05x MOD=%05x'
+              % (fname(*k), kin, kmod))
     nabi = sum(1 for k in gens if summ.MOD[k] != (ALLREGS | FLAGS))
     print('ABI summaries converged after %d passes; %d/%d functions with precise summaries'
           % (iters, nabi, len(gens)))
@@ -783,6 +762,7 @@ def main():
     for f in funcs:
         g = gens[(f['addr'], f['thumb'])]
         g.set_summaries(summ)
+        g.warn_entry = (f['addr'], f['thumb']) in unreachable
         bodies.append((f, g.generate()))
     # header with prototypes
     with open(os.path.join(outdir, 'gen_funcs.h'), 'w') as h:

@@ -1,0 +1,92 @@
+# Dragon Ball Z: The Legacy of Goku II (USA, ALFE, rev 0)
+# SHA-1 18e0715dec419f3501c301511530d2edcd590f8b
+#
+# Discovery metadata for tools/analyze.py.  Function entries are found by the
+# analyzer itself (relative vtables, pointer scans, gap filling); only facts
+# it cannot infer are listed here.  Addresses verified by disassembly and
+# cross-checked with github.com/mstan/DragonBallZLegacyofGokuIIRecomp.
+
+[program]
+id = "ALFE"
+load_address = 0x08000000
+size = 0x00800000
+entry_pc = 0x08000000
+
+# crt0 copies the ARM support/IRQ image into IWRAM
+[[code_copy]]
+runtime_start = 0x03000000
+source_start = 0x087FD6BC
+size = 0x00000E1C
+name = "iwram_support_code"
+
+# .ctors, walked by the constructor runner at 0x08021D74
+[[jump_table]]
+addr = 0x08023588
+stride = 4
+count = 69
+format = "pcrel_thumb"
+entries_mode = "thumb"
+name = "runtime_initializers"
+
+# script-engine native function tables (slices; the analyzer scans the rest)
+[[jump_table]]
+addr = 0x083B5C54
+stride = 4
+count = 6
+format = "abs32"
+entries_mode = "auto"
+
+[[jump_table]]
+addr = 0x083EC84C
+stride = 4
+count = 6
+format = "abs32"
+entries_mode = "auto"
+
+# Hand-written ARM entry points the IRQ code reaches by computed branches
+[[extra_func]]
+addr = 0x03000798
+source_addr = 0x087FDE54
+mode = "arm"
+note = "DMA2 (sound) IRQ callback"
+
+[[extra_func]]
+addr = 0x03000824
+source_addr = 0x087FDEE0
+mode = "arm"
+note = "IRQ dispatcher (replaced natively, kept for reference)"
+
+[[extra_func]]
+addr = 0x03000950
+source_addr = 0x087FE00C
+mode = "thumb"
+note = "bx r4 trampoline used as IRQ handler return"
+
+[[extra_func]]
+addr = 0x08021388
+mode = "thumb"
+note = "Sleep routine (SWI 3 Stop)"
+
+# Functions that never return (newlib/libgcc error and exit paths).  Calls to
+# them contribute nothing to register summaries.
+[[noreturn]]
+addr = 0x08022C68
+mode = "arm"
+note = "_exit (semihosting SYS_EXIT)"
+
+[[noreturn]]
+addr = 0x08022A8C
+mode = "arm"
+note = "__div0 -> _exit(2)"
+
+[[noreturn]]
+addr = 0x08021D38
+mode = "thumb"
+note = "exit(): runs destructors then _exit"
+
+# Paths assumed never to run (summaries treat them as noreturn); the generated
+# code logs loudly on entry so a wrong assumption is caught.
+[[assume_unreachable]]
+addr = 0x08023714
+mode = "arm"
+note = "veneer to newlib raise(SIGFPE) on the soft-float exception path; FP traps are never enabled"

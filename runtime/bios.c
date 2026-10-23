@@ -133,6 +133,11 @@ void gba_undefined(uint32_t pc, uint32_t raw) {
     gba_panic("undefined instruction %08X at %08X", (unsigned)raw, (unsigned)pc);
 }
 
+void gba_unexpected(uint32_t addr) {
+    plat_log("WARNING: entered %08X, assumed unreachable by the recompiler; register "
+             "summaries of its callers may be wrong", (unsigned)addr);
+}
+
 void gba_bad_stack(uint32_t a) {
     gba_panic("stack access outside IWRAM: %08X", (unsigned)a);
 }

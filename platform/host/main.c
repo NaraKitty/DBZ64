@@ -27,17 +27,28 @@ extern unsigned gba_miss_count;
 
 static uint32_t *rom_words;
 static uint32_t rom_size;
+/* --rom-profile: keep ROM on the slow path and count reads per 4KB page */
+static int rom_profile;
+static uint32_t rom_page_reads[0x800];
+static int rom_page_first_frame[0x800];
+static int frame;
 
 void gba_rom_map_init(void) {
     for (uint32_t off = 0; off < 0x01000000; off += 0x1000)
         gba_mem_map_rom_page(0x08000 + (off >> 12),
-                             off < rom_size ? (const uint8_t *)rom_words + off : NULL);
+                             (off < rom_size && !rom_profile) ? (const uint8_t *)rom_words + off : NULL);
 }
 
 uint32_t gba_rom_read32(uint32_t a) {
     uint32_t off = a & 0x01FFFFFC;
-    if (off < rom_size)
+    if (off < rom_size) {
+        if (rom_profile) {
+            uint32_t pg = off >> 12;
+            if (!rom_page_reads[pg]++)
+                rom_page_first_frame[pg] = frame;
+        }
         return rom_words[off >> 2];
+    }
     /* past the end of the ROM the bus returns the halfword address */
     uint32_t h = (a >> 1) & 0xFFFF;
     return h | ((h + 1) << 16);
@@ -78,7 +89,6 @@ static const char *wav_path;
 typedef struct { int from, to; uint16_t keys; } keyspan_t;
 static keyspan_t spans[256];
 static int nspans;
-static int frame;
 static uint16_t cur_keys = 0x3FF;
 
 static uint16_t parse_keys(const char *s) {
@@ -247,7 +257,19 @@ static void finish(void) {
     double secs = difftime(time(NULL), t_start);
     fprintf(stderr, "[host] %d frames in %.0fs; %u dispatch misses\n", frame, secs, gba_miss_count);
     for (unsigned i = 0; i < gba_miss_count; i++)
-        fprintf(stderr, "  miss %08X %s\n", gba_miss_log[i] & ~1u, (gba_miss_log[i] & 1) ? "T" : "A");
+        fprintf(stderr, "  miss %08X %s\n", (unsigned)(gba_miss_log[i] & ~1u), (gba_miss_log[i] & 1) ? "T" : "A");
+    if (rom_profile) {
+        char path[512];
+        snprintf(path, sizeof path, "%s/rom_profile.txt", outdir);
+        FILE *f = fopen(path, "w");
+        if (f) {
+            for (int pg = 0; pg < 0x800; pg++)
+                if (rom_page_reads[pg])
+                    fprintf(f, "%08X %u %d\n", 0x08000000u + pg * 0x1000u,
+                            (unsigned)rom_page_reads[pg], rom_page_first_frame[pg]);
+            fclose(f);
+        }
+    }
 }
 
 void plat_frame(void) {
@@ -308,6 +330,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--keys")) { parse_spans(v); i++; }
         else if (!strcmp(a, "--save")) { save_path = v; i++; }
         else if (!strcmp(a, "--wav")) { wav_path = v; i++; }
+        else if (!strcmp(a, "--rom-profile")) { rom_profile = 1; }
         else if (!strcmp(a, "--shot")) {
             char *dup = strdup(v), *sv = NULL;
             for (char *t = strtok_r(dup, ",", &sv); t && nshots < 256; t = strtok_r(NULL, ",", &sv))

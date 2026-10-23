@@ -72,6 +72,8 @@ static inline void sp_wr32(uint32_t a, uint32_t v) { STK_CHECK(a); STK32(a) = v;
 int gba_jump(uint32_t target);
 void gba_exc_return(void);                /* movs pc / ldm ^ with pc */
 void gba_undefined(uint32_t pc, uint32_t raw);
+/* entered a function the recompiler assumed unreachable (see tools/game.toml) */
+void gba_unexpected(uint32_t addr);
 void gba_msr(uint32_t value, uint32_t mask, int spsr);
 uint32_t gba_mrs(int spsr);
 void gba_stm_user(uint32_t addr, uint32_t list);
