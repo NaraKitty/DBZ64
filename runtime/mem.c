@@ -78,6 +78,16 @@ void gba_mem_init(void) {
 volatile uint32_t gba_vram_dirty;
 
 static void vram_set_protect(uint32_t page, int protect) {
+#ifdef GBA_TLB
+    /* The TLB write-protects VRAM (tlb_vram_set_writable).  The only
+     * host-pointer writer, the DMA fast path, marks pages itself, so the
+     * page tables stay writable: rewriting them (256 entries per page, every
+     * frame) was the single largest runtime cost, and protected entries
+     * pushed VRAM-bound DMAs off the fast path. */
+    (void)page;
+    (void)protect;
+    return;
+#endif
     /* page 0..23 is mapped at every 128KB mirror; pages 16..23 also appear
      * at offsets 0x18000..0x1FFFF of each mirror */
     for (uint32_t base = 0x06000; base < 0x07000; base += 0x20) {
