@@ -59,6 +59,8 @@ static struct {
     int nodraw;          /* skip drawing except on shot frames (fast runs) */
     int frameskip;       /* use the real-time frame skip (off in test runs by default) */
     int slow_us;         /* burn this much CPU per frame (imitates slower hardware) */
+    int draw_from;       /* with nodraw: draw every frame from this one on */
+    int rdp_us;          /* pretend each frame keeps the RDP busy this long (needs frameskip) */
     int profile_from;    /* start the sampling profiler at this frame */
     int frames;
     int shots[64], nshots;
@@ -100,6 +102,10 @@ static void load_test_script(void) {
             test.nodraw = 1;
         } else if (!strncmp(line, "frameskip", 9)) {
             test.frameskip = 1;
+        } else if (sscanf(line, "rdpslow %d", &a) == 1) {
+            test.rdp_us = a;
+        } else if (sscanf(line, "drawfrom %d", &a) == 1) {
+            test.draw_from = a;
         } else if (sscanf(line, "slow %d", &a) == 1) {
             test.slow_us = a;
         } else if (sscanf(line, "profile %d", &a) == 1) {
@@ -301,6 +307,7 @@ static void overlay_account(uint64_t game, uint64_t draw, int drawn) {
     }
 }
 
+#ifndef USE_RDP
 /* CPU text over a finished frame (the RDP must be done with it) */
 static void overlay_draw(surface_t *disp) {
     graphics_draw_box(disp, 0, 0, 320, 22, graphics_make_color(0, 0, 0, 255));
@@ -308,6 +315,7 @@ static void overlay_draw(surface_t *disp) {
     graphics_draw_text(disp, 4, 2, overlay_text[0]);
     graphics_draw_text(disp, 4, 12, overlay_text[1]);
 }
+#endif
 
 /* ------------------------------------------------------------ video */
 
@@ -357,17 +365,31 @@ static void get_frame_view(void) {
     }
 }
 
+/* the overlay text, drawn by the RDP so nothing waits for it */
+#define OVERLAY_FONT 1
+
+static void overlay_rdp(void) {
+    static int font_ready;
+    if (!font_ready) {
+        rdpq_text_register_font(OVERLAY_FONT, rdpq_font_load_builtin(FONT_BUILTIN_DEBUG_MONO));
+        font_ready = 1;
+    }
+    rdpq_set_mode_fill(RGBA16(0, 0, 0, 1));
+    rdpq_fill_rectangle(0, 0, 320, 22);
+    rdpq_text_print(NULL, OVERLAY_FONT, 4, 10, overlay_text[0]);
+    rdpq_text_print(NULL, OVERLAY_FONT, 4, 20, overlay_text[1]);
+}
+
 /* RDP renderer: enqueue the frame; the RDP finishes it while the game runs
  * the next frame.  Returns after the frame is queued for display. */
 static void draw_frame_rdp(surface_t *disp, int dump) {
     rdpq_attach(disp, NULL);
     gba_render_frame(disp, &frame_view);
-    if (dump || overlay) {
+    if (overlay)
+        overlay_rdp();
+    if (dump) {
         rdpq_detach_wait();
-        if (overlay)
-            overlay_draw(disp);
-        if (dump)
-            fb_dump(frame, disp);
+        fb_dump(frame, disp);
         display_show(disp);
     } else {
         rdpq_detach_show();
@@ -386,21 +408,26 @@ static uint64_t t_frame_end, acc_game, acc_wait, acc_draw;
 /* Game pacing.  Guest time advances one GBA frame per plat_frame and each
  * GBA frame produces 280896 / 1050 = 267.52 audio samples, so the game must
  * run at audio_frequency / 267.52 frames per second (59.82 at the AI's
- * 16004 Hz) or the audio runs dry or piles up.  Drawing waits for the
- * display, which is about that rate on a 60 Hz console but 50 Hz on PAL
- * timing.  The schedule below is kept in real time: when the game is more
- * than half a frame behind it, the frame is not drawn (the VI keeps showing
- * the previous one) and the next game frame runs at once; at most MAX_SKIP
- * frames in a row are skipped.  On a 50 Hz display that is about one game
- * frame in six; at 60 Hz, only frames that ran long. */
+ * 16004 Hz) or the audio runs dry or piles up.  The game therefore runs on
+ * its own real-time schedule and video never holds it up:
+ *   - ahead of the schedule, it waits (this is what paces the game);
+ *   - more than half a frame behind, the frame is not drawn and the next
+ *     game frame runs at once (at most MAX_SKIP in a row for this reason);
+ *   - while the RDP is still drawing the previous frame or no framebuffer
+ *     is free (50 Hz display, slow scenes), the frame is not drawn either,
+ *     instead of waiting.
+ * The VI keeps showing the last frame drawn, so heavy scenes lose frames
+ * on screen while game speed, music and sound effects stay steady. */
 #define GBA_SAMPLES_PER_FRAME_X100 26752u
-#define MAX_SKIP 2
+#define MAX_SKIP 4
 static uint64_t frame_ticks;   /* real time per game frame */
 static uint64_t deadline;      /* real time at which this frame is due */
 static int skip_run;
-static uint32_t stat_skipped;
+static uint32_t stat_skipped, stat_skip_late, stat_skip_busy;
+static uint64_t t_submitted;   /* test 'rdpslow': when the last frame was queued */
 
-__attribute__((unused)) static int frame_should_skip(uint64_t now) {
+/* keep the schedule; 1 = too far behind to draw this frame */
+__attribute__((unused)) static int frame_pace(uint64_t now) {
     if (!frame_ticks)
         frame_ticks = (uint64_t)TICKS_PER_SECOND * GBA_SAMPLES_PER_FRAME_X100 /
                       (100u * (uint64_t)audio_get_frequency());
@@ -411,15 +438,28 @@ __attribute__((unused)) static int frame_should_skip(uint64_t now) {
         deadline = now;
         late = 0;
     } else if (late < -(int64_t)frame_ticks) {
-        /* the display runs faster than the game: bank at most one frame */
+        /* never bank more than one frame of credit */
         deadline = now + frame_ticks;
+        late = -(int64_t)frame_ticks;
     }
+    if (late < 0)
+        wait_ticks((unsigned long)-late);
     if (late > (int64_t)(frame_ticks / 2) && skip_run < MAX_SKIP) {
         skip_run++;
         return 1;
     }
     skip_run = 0;
     return 0;
+}
+
+/* the RDP is still drawing the previous frame (or, in a 'rdpslow' test,
+ * pretends to be for that long) */
+__attribute__((unused)) static int video_busy(void) {
+#ifdef USE_RDP
+    if (gba_render_busy())
+        return 1;
+#endif
+    return test.rdp_us && get_ticks() - t_submitted < TICKS_FROM_US(test.rdp_us);
 }
 
 void plat_frame(void) {
@@ -449,18 +489,34 @@ void plat_frame(void) {
     get_frame_view();
     int drawn = 0;
     uint64_t t2 = t1;
-    if (test.nodraw && !shot_now) {
+    if (test.nodraw && !shot_now && !(test.draw_from && frame >= test.draw_from)) {
         /* fast test runs: nothing drawn, still paced by the display */
         surface_t *disp = display_get();
         t2 = get_ticks();
         display_show(disp);
-    } else if ((test.active && !test.frameskip) || shot_now || !frame_should_skip(t1)) {
+    } else if ((test.active && !test.frameskip) || shot_now) {
+        /* measurement runs and screenshots: every frame, paced by vsync */
         surface_t *disp = display_get();
         t2 = get_ticks();
         draw_frame_rdp(disp, test.active && shot_now);
+        t_submitted = get_ticks();
         drawn = 1;
     } else {
-        stat_skipped++;   /* the VI keeps showing the previous frame */
+        surface_t *disp = NULL;
+        if (frame_pace(t1))
+            stat_skip_late++;
+        else if (video_busy())
+            stat_skip_busy++;
+        else
+            disp = display_try_get();
+        t2 = get_ticks();
+        if (disp) {
+            draw_frame_rdp(disp, 0);
+            t_submitted = get_ticks();
+            drawn = 1;
+        } else {
+            stat_skipped++;   /* the VI keeps showing the previous frame */
+        }
     }
     uint64_t t3 = get_ticks();
 #else
@@ -489,11 +545,12 @@ void plat_frame(void) {
                (double)TICKS_TO_US(now - t_last) / 120000.0, (double)TICKS_TO_US(acc_game) / 120000.0,
                (double)TICKS_TO_US(acc_wait) / 120000.0, (double)TICKS_TO_US(acc_draw) / 120000.0,
                (unsigned long)rom_cache_stats.misses);
-        debugf("f%d: audio blocks %lu dropped %lu queued %d; frames skipped %lu\n", frame,
-               (unsigned long)stat_audio_blocks, (unsigned long)stat_audio_drops, (int)(a_wr - a_rd),
-               (unsigned long)stat_skipped);
+        debugf("f%d: audio blocks %lu dropped %lu queued %d; frames skipped %lu (late %lu, rdp busy %lu)\n",
+               frame, (unsigned long)stat_audio_blocks, (unsigned long)stat_audio_drops,
+               (int)(a_wr - a_rd), (unsigned long)stat_skipped, (unsigned long)stat_skip_late,
+               (unsigned long)stat_skip_busy);
         stat_audio_blocks = stat_audio_drops = 0;
-        stat_skipped = 0;
+        stat_skipped = stat_skip_late = stat_skip_busy = 0;
         debugf("f%d: tlb refills %lu emulated %lu (last va %08lX pc %08lX) vram marks %lu\n", frame,
                (unsigned long)tlb_stats.rom_refills, (unsigned long)tlb_stats.emulated,
                (unsigned long)tlb_stats.last_va, (unsigned long)tlb_stats.last_epc,

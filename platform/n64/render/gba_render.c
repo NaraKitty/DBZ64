@@ -552,6 +552,10 @@ static void final_pass_tlut(void) {
     pipe_tlut = -1;
 }
 
+int gba_render_busy(void) {
+    return have_sp && !rspq_syncpoint_check(last_sp);
+}
+
 void gba_render_frame(surface_t *disp, const gba_view_t *view) {
     uint64_t t_start = get_ticks();
     memset(&r_stats, 0, sizeof r_stats);

@@ -56,6 +56,11 @@ typedef struct gba_view {
 void gba_render_init(void);
 void gba_render_frame(surface_t *disp, const gba_view_t *view);
 
+/* 1 while the RDP is still drawing the previous gba_render_frame: calling
+ * gba_render_frame now would wait for it.  Lets a caller skip a frame
+ * instead of stalling the game. */
+int gba_render_busy(void);
+
 /* ---- extras (test harness / platform diagnostics) ---- */
 
 /* The native view: 240x160 at (40,40), no hooks. */
