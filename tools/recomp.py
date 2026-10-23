@@ -43,6 +43,13 @@ def hx(v):
     return '0x%08Xu' % (v & 0xffffffff)
 
 
+# ------------------------------------------------------------ hooks
+
+# pc -> C function name; filled from game.toml
+OVERRIDE_LOAD = {}      # value loaded at pc is passed through func(value)
+HOOK_BEFORE = {}        # func(const uint32_t regs[15]) runs before pc
+
+
 # ------------------------------------------------------------ function
 
 class FuncGen:
@@ -297,6 +304,16 @@ class FuncGen:
 
     # -------------------------------------------- instruction emission
     def emit_ins(self, i):
+        out = []
+        if i.addr in HOOK_BEFORE:
+            out.append('{ const uint32_t hr[15] = { r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, '
+                       'r11, r12, r13, r14 }; %s(hr); }' % HOOK_BEFORE[i.addr])
+        body = self.emit_ins_core(i)
+        if i.addr in OVERRIDE_LOAD and i.op == 'mem' and i.load and i.rd != 15:
+            body = body + ['r%d = %s(r%d);' % (i.rd, OVERRIDE_LOAD[i.addr], i.rd)]
+        return out + body
+
+    def emit_ins_core(self, i):
         a = i.addr
         k = self.kind[a]
         out = []
@@ -843,6 +860,10 @@ def main():
     import tomllib
     cfg = tomllib.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'game.toml'), 'rb'))
     noreturn = {(e['addr'], e.get('mode', 'thumb') == 'thumb') for e in cfg.get('noreturn', [])}
+    for e in cfg.get('override_load', []):
+        OVERRIDE_LOAD[e['pc']] = e['func']
+    for e in cfg.get('hook_before', []):
+        HOOK_BEFORE[e['pc']] = e['func']
     unreachable = {(e['addr'], e.get('mode', 'thumb') == 'thumb') for e in cfg.get('assume_unreachable', [])}
     noreturn |= unreachable
     taken -= noreturn
@@ -870,6 +891,10 @@ def main():
     with open(os.path.join(outdir, 'gen_funcs.h'), 'w') as h:
         h.write('#ifndef GEN_FUNCS_H\n#define GEN_FUNCS_H\n#include "recomp.h"\n')
         h.write('int gba_jump(uint32_t target);\n')
+        for fn in sorted(set(OVERRIDE_LOAD.values())):
+            h.write('uint32_t %s(uint32_t v);\n' % fn)
+        for fn in sorted(set(HOOK_BEFORE.values())):
+            h.write('void %s(const uint32_t *regs);\n' % fn)
         for f, _ in bodies:
             h.write('void %s(void);\n' % fname(f['addr'], f['thumb']))
         h.write('#endif\n')

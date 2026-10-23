@@ -48,7 +48,7 @@ $(N64_MKDFS_ROOT)/rom.bin: $(BASEROM) $(REPO)/tools/mkrom.py
 	@mkdir -p $(dir $@)
 	python3 $(REPO)/tools/mkrom.py $(BASEROM) $@
 
-$(BUILD_DIR)/dbz.dfs: $(N64_MKDFS_ROOT)/rom.bin
+$(BUILD_DIR)/dbz.dfs: $(N64_MKDFS_ROOT)/rom.bin $(wildcard $(N64_MKDFS_ROOT)/*.txt)
 $(BUILD_DIR)/dbz.elf: $(OBJS)
 
 dbz.z64: N64_ROM_TITLE = "DBZ LEGACY GOKU2"

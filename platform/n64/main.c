@@ -256,8 +256,15 @@ static void draw_frame_cpu(surface_t *disp) {
 /* ------------------------------------------------------------ frame */
 
 static uint64_t t_last;
+/* per-phase CPU time over the reporting window: guest code (everything
+ * between frames: game logic, IRQ handlers, mixing), waiting for a free
+ * framebuffer (vsync), and drawing */
+static uint64_t t_frame_end, acc_game, acc_wait, acc_draw;
 
 void plat_frame(void) {
+    uint64_t t0 = get_ticks();
+    if (t_frame_end)
+        acc_game += t0 - t_frame_end;
     frame++;
 
     keyinput = (uint16_t)(0x3FF & ~read_controller());
@@ -269,8 +276,13 @@ void plat_frame(void) {
         keyinput = (uint16_t)(0x3FF & ~pressed);
     }
 
+    uint64_t t1 = get_ticks();
     surface_t *disp = display_get();
+    uint64_t t2 = get_ticks();
     draw_frame_cpu(disp);
+    uint64_t t3 = get_ticks();
+    acc_wait += t2 - t1;
+    acc_draw += t3 - t2;
     if (test.active)
         for (int i = 0; i < test.nshots; i++)
             if (test.shots[i] == frame)
@@ -282,12 +294,14 @@ void plat_frame(void) {
 
     if ((frame % 120) == 0) {
         uint64_t now = get_ticks();
+        debugf("f%d: %.2f ms/frame (game %.2f, vsync wait %.2f, draw %.2f) rom misses %lu\n", frame,
+               (double)TICKS_TO_US(now - t_last) / 120000.0, (double)TICKS_TO_US(acc_game) / 120000.0,
+               (double)TICKS_TO_US(acc_wait) / 120000.0, (double)TICKS_TO_US(acc_draw) / 120000.0,
+               (unsigned long)rom_cache_stats.misses);
         debugf("f%d: tlb refills %lu emulated %lu vram marks %lu\n", frame,
                (unsigned long)tlb_stats.rom_refills, (unsigned long)tlb_stats.emulated,
                (unsigned long)tlb_stats.vram_marks);
-        debugf("f%d: %.2f ms/frame, rom misses %lu evictions %lu\n", frame,
-               (double)TICKS_TO_US(now - t_last) / 120.0 / 1000.0,
-               (unsigned long)rom_cache_stats.misses, (unsigned long)rom_cache_stats.evictions);
+        acc_game = acc_wait = acc_draw = 0;
         t_last = now;
     }
 
@@ -296,6 +310,7 @@ void plat_frame(void) {
         emux_ioctl_exit();
         for (;;) { }
     }
+    t_frame_end = get_ticks();
 }
 
 void plat_sleep(void) {
