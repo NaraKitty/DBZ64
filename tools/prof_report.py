@@ -14,6 +14,9 @@ from collections import Counter
 
 def main():
     log, elf = sys.argv[1], sys.argv[2]
+    # Git Bash rewrites "/mnt/d/..." to "C:/Program Files/Git/mnt/d/..."
+    # before Python sees it; addr2line runs in WSL and needs the original
+    elf = re.sub(r'^.*?(/mnt/[a-z]/)', r'\1', elf.replace('\\', '/'))
     top = int(sys.argv[3]) if len(sys.argv) > 3 else 40
     rows = []
     total = 0

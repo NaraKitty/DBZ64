@@ -130,7 +130,22 @@ static void dma_transfer(int ch) {
         /* contiguous host memory; 16-bit units on word boundaries copy as words */
         uint32_t nw = word ? n : n / 2;
         uint32_t *ws = (uint32_t *)hs, *wt = (uint32_t *)ht;
-        if (sinc) {
+        if (sinc && nw <= 16) {
+            /* tile-sized copies (most of the game's DMAs): forward word
+             * copy like the hardware, without a library call */
+            while (nw >= 4) {
+                uint32_t a = ws[0], b = ws[1], c = ws[2], e = ws[3];
+                wt[0] = a;
+                wt[1] = b;
+                wt[2] = c;
+                wt[3] = e;
+                ws += 4;
+                wt += 4;
+                nw -= 4;
+            }
+            while (nw--)
+                *wt++ = *ws++;
+        } else if (sinc) {
             memmove(wt, ws, nw * 4);
         } else {
             uint32_t v = *ws;

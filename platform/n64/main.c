@@ -162,37 +162,43 @@ uint16_t plat_keyinput(void) {
 
 /* ------------------------------------------------------------ audio */
 
-#define ABUF_FRAMES 4096
+/* ring of stereo frames; blocks are 16 frames and never straddle the end */
+#define ABUF_FRAMES 4096u
 static int16_t abuf[ABUF_FRAMES * 2];
-static int alen;   /* stereo frames queued */
+static uint32_t a_rd, a_wr;   /* frame counters; a_wr - a_rd are queued */
 
 static uint32_t stat_audio_blocks, stat_audio_drops;
 
 void plat_audio_block(const int8_t *left, const int8_t *right) {
     stat_audio_blocks++;
-    if (alen + 16 > ABUF_FRAMES) {
+    if (a_wr - a_rd + 16 > ABUF_FRAMES) {
         stat_audio_drops++;
         return;   /* the AI is not draining (should not happen) */
     }
-    int16_t *o = abuf + alen * 2;
+    int16_t *o = abuf + (a_wr & (ABUF_FRAMES - 1)) * 2;
     for (int i = 0; i < 16; i++) {
         o[2 * i] = (int16_t)(left[i] * 256);
         o[2 * i + 1] = (int16_t)(right[i] * 256);
     }
-    alen += 16;
+    a_wr += 16;
 }
 
 static void audio_flush(void) {
-    if (!alen)
-        return;
-    int pushed = audio_push(abuf, alen, false);
-    if (pushed > 0 && pushed < alen)
-        memmove(abuf, abuf + pushed * 2, (size_t)(alen - pushed) * 4);
-    if (pushed > 0)
-        alen -= pushed;
+    while (a_rd != a_wr) {
+        uint32_t pos = a_rd & (ABUF_FRAMES - 1);
+        uint32_t n = a_wr - a_rd;
+        if (n > ABUF_FRAMES - pos)
+            n = ABUF_FRAMES - pos;
+        int pushed = audio_push(abuf + pos * 2, (int)n, false);
+        if (pushed <= 0)
+            break;
+        a_rd += (uint32_t)pushed;
+        if ((uint32_t)pushed < n)
+            break;
+    }
     /* keep latency bounded if the AI falls behind */
-    if (alen > ABUF_FRAMES / 2)
-        alen = 0;
+    if (a_wr - a_rd > ABUF_FRAMES / 2)
+        a_rd = a_wr;
 }
 
 /* ------------------------------------------------------------ saves */
@@ -249,6 +255,34 @@ void plat_save_block(uint32_t block) {
     save_dirty = 1;
 }
 
+/* ------------------------------------------------------------ overlay */
+
+static char overlay_text[64];
+static uint64_t ov_t0, ov_game, ov_draw;
+static int ov_frames;
+
+static void overlay_account(uint64_t game, uint64_t draw) {
+    ov_game += game;
+    ov_draw += draw;
+    if (++ov_frames == 30) {
+        uint64_t now = get_ticks();
+        double secs = (double)TICKS_TO_US(now - ov_t0) / 1e6;
+        snprintf(overlay_text, sizeof overlay_text, "%4.1f fps  game %4.1f ms  draw %4.1f ms",
+                 ov_t0 ? 30.0 / secs : 0.0, (double)TICKS_TO_US(ov_game) / 30000.0,
+                 (double)TICKS_TO_US(ov_draw) / 30000.0);
+        ov_t0 = now;
+        ov_game = ov_draw = 0;
+        ov_frames = 0;
+    }
+}
+
+/* CPU text over a finished frame (the RDP must be done with it) */
+static void overlay_draw(surface_t *disp) {
+    graphics_draw_box(disp, 0, 0, 320, 12, graphics_make_color(0, 0, 0, 255));
+    graphics_set_color(graphics_make_color(255, 255, 0, 255), 0);
+    graphics_draw_text(disp, 4, 2, overlay_text);
+}
+
 /* ------------------------------------------------------------ video */
 
 static uint16_t gba_fb[240 * 160];
@@ -292,34 +326,6 @@ static void draw_frame_rdp(surface_t *disp, int dump) {
     }
 }
 #endif
-
-/* ------------------------------------------------------------ overlay */
-
-static char overlay_text[64];
-static uint64_t ov_t0, ov_game, ov_draw;
-static int ov_frames;
-
-static void overlay_account(uint64_t game, uint64_t draw) {
-    ov_game += game;
-    ov_draw += draw;
-    if (++ov_frames == 30) {
-        uint64_t now = get_ticks();
-        double secs = (double)TICKS_TO_US(now - ov_t0) / 1e6;
-        snprintf(overlay_text, sizeof overlay_text, "%4.1f fps  game %4.1f ms  draw %4.1f ms",
-                 ov_t0 ? 30.0 / secs : 0.0, (double)TICKS_TO_US(ov_game) / 30000.0,
-                 (double)TICKS_TO_US(ov_draw) / 30000.0);
-        ov_t0 = now;
-        ov_game = ov_draw = 0;
-        ov_frames = 0;
-    }
-}
-
-/* CPU text over a finished frame (the RDP must be done with it) */
-static void overlay_draw(surface_t *disp) {
-    graphics_draw_box(disp, 0, 0, 320, 12, graphics_make_color(0, 0, 0, 255));
-    graphics_set_color(graphics_make_color(255, 255, 0, 255), 0);
-    graphics_draw_text(disp, 4, 2, overlay_text);
-}
 
 /* ------------------------------------------------------------ frame */
 
@@ -382,7 +388,7 @@ void plat_frame(void) {
                (double)TICKS_TO_US(acc_wait) / 120000.0, (double)TICKS_TO_US(acc_draw) / 120000.0,
                (unsigned long)rom_cache_stats.misses);
         debugf("f%d: audio blocks %lu dropped %lu queued %d\n", frame,
-               (unsigned long)stat_audio_blocks, (unsigned long)stat_audio_drops, alen);
+               (unsigned long)stat_audio_blocks, (unsigned long)stat_audio_drops, (int)(a_wr - a_rd));
         stat_audio_blocks = stat_audio_drops = 0;
         debugf("f%d: tlb refills %lu emulated %lu (last va %08lX pc %08lX) vram marks %lu\n", frame,
                (unsigned long)tlb_stats.rom_refills, (unsigned long)tlb_stats.emulated,
