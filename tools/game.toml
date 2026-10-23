@@ -103,6 +103,18 @@ addr = 0x03000704
 mode = "arm"
 func = "native_clip"
 
+# field-layer tilemap rebuild: ~256 DMA3 row copies per frame done directly
+[[native]]
+addr = 0x080054A4
+mode = "thumb"
+func = "native_map_refresh"
+
+# strided 8x8 tile gather out of decoded sprite bitmaps (IWRAM copy)
+[[native]]
+addr = 0x03000480
+mode = "arm"
+func = "native_tile_gather"
+
 # ---------------------------------------------------------------- 320x240 view
 # runtime/widescreen.c, docs/WIDESCREEN.md.  Every PC below was checked by
 # disassembly to be the LDR of the camera-rect field named by the function.
@@ -583,3 +595,19 @@ func = "ws_py_r0"
 [[hook_before]]
 pc = 0x08008E2A
 func = "ws_py_r1"
+
+# ---------------------------------------------------------------- ROM cache
+# 16KB ROM pages loaded into the N64 ROM cache at boot (tools/rom_hotset.py
+# over host --rom-profile traces of the scripted playthrough and a
+# 50000-frame random-input run): each one would otherwise be a cartridge
+# read with interrupts off, mid-game, the first time it is used.
+[rom]
+preload = [
+    8, 117, 118, 448, 510, 511, 62, 76, 82, 94, 95, 447, 77, 58, 67, 78,
+    65, 70, 449, 63, 57, 64, 79, 450, 451, 59, 452, 453, 454, 455, 456, 457,
+    9, 10, 11, 56, 61, 17, 18, 223, 224, 225, 237, 251, 258, 259, 261, 311,
+    317, 425, 426, 441, 442, 443, 444, 445, 72, 90, 91, 238, 16, 380, 71, 74,
+    103, 75, 81, 161, 260, 340, 427, 433, 431, 437, 36, 37, 73, 21, 440, 46,
+    0, 428, 446, 23, 24, 438, 20, 49, 35, 40, 41, 31, 162, 50, 115, 116,
+    42, 43, 69, 68, 33, 313, 348,
+]

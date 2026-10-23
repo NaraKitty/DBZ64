@@ -556,6 +556,9 @@ typedef struct {
     uint8_t has_x, has_y, cls;
 } side_t;
 static side_t side_build[128], side_live[128];
+/* slots ever written: everything above is zero in both arrays, so clears
+ * and copies can stop there (they ran every frame over all 128) */
+static int side_hwm;
 static int live_valid;
 
 #define MAXCAND 128
@@ -589,7 +592,7 @@ void ws_py_r3_m256(const uint32_t *r) { add_y((int32_t)r[3] - 256); }
 /* 0x08006BCE: the build clears the shadow OAM */
 void ws_hook_oam_clear(const uint32_t *regs) {
     (void)regs;
-    memset(side_build, 0, sizeof side_build);
+    memset(side_build, 0, (size_t)side_hwm * sizeof(side_t));
     build_used = 0;
 }
 
@@ -671,13 +674,15 @@ void ws_hook_emit_end(const uint32_t *regs) {
         }
         if (slot + 1 > build_used)
             build_used = slot + 1;
+        if (slot + 1 > side_hwm)
+            side_hwm = slot + 1;
     }
 }
 
 /* 0x08006AAE / 0x080070B0: the shadow OAM is copied to OAM */
 void ws_hook_oam_upload(const uint32_t *regs) {
     (void)regs;
-    memcpy(side_live, side_build, sizeof side_live);
+    memcpy(side_live, side_build, (size_t)side_hwm * sizeof(side_t));
     live_valid = 1;
     st.slots_used = build_used;
     if (build_used > st.slots_max)

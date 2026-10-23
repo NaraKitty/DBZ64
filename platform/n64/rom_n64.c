@@ -6,8 +6,13 @@
  * cannot fit in RDRAM next to the recompiled code, so 16KB pages are copied
  * in by PI DMA on first access.  A resident page is visible to the runtime
  * through its 4KB page tables and, in GBA_TLB builds, to generated code
- * through TLB entries installed on demand by tlb.c.  Pages are evicted
- * round-robin; the measured working set (well under 1MB during play) fits.
+ * through TLB entries installed on demand by tlb.c.
+ *
+ * Every miss is a stall with interrupts off (PI DMA inside the TLB
+ * exception), so the game's hot pages (game.toml [rom] preload, measured on
+ * the host) are loaded at boot.  When the cache is full the least recently
+ * used page goes: a resident page is stamped whenever it is looked up, which
+ * happens on every TLB refill and slow-path read.
  */
 #include <libdragon.h>
 #include <malloc.h>
@@ -25,7 +30,12 @@ static uint8_t *slots;
 static int nslots;
 static int16_t page_slot[NPAGES];      /* -1 = not resident */
 static int16_t *slot_page;             /* -1 = free */
-static int next_victim;
+static uint32_t *slot_used;            /* use stamp */
+static uint32_t use_clock;
+
+/* the preload list comes with the generated code (gen_rom_preload.c) */
+extern const uint16_t gba_rom_preload[] __attribute__((weak));
+extern const int gba_rom_preload_n __attribute__((weak));
 
 rom_cache_stats_t rom_cache_stats;
 
@@ -39,11 +49,13 @@ void rom_cache_init(int bytes) {
     if (!slots)
         gba_panic("cannot allocate the ROM cache (%d bytes)", bytes);
     slot_page = malloc(sizeof(int16_t) * (size_t)nslots);
+    slot_used = calloc((size_t)nslots, sizeof(uint32_t));
+    if (!slot_page || !slot_used)
+        gba_panic("cannot allocate the ROM cache tables");
     for (int i = 0; i < nslots; i++)
         slot_page[i] = -1;
     for (int i = 0; i < (int)NPAGES; i++)
         page_slot[i] = -1;
-    next_victim = 0;
 }
 
 static void map_page(uint32_t pg, const uint8_t *p) {
@@ -61,8 +73,12 @@ void gba_rom_map_init(void) {
 }
 
 static uint8_t *load_page(uint32_t pg) {
-    int s = next_victim;
-    next_victim = (next_victim + 1) % nslots;
+    /* a free slot, else the least recently used one */
+    int s = 0;
+    for (int i = 0; i < nslots; i++) {
+        if (slot_page[i] < 0) { s = i; break; }
+        if (slot_used[i] < slot_used[s]) s = i;
+    }
     if (slot_page[s] >= 0) {
         uint32_t old = (uint32_t)slot_page[s];
         page_slot[old] = -1;
@@ -77,9 +93,28 @@ static uint8_t *load_page(uint32_t pg) {
     dma_read(p, rom_base + pg * PAGE, PAGE);
     slot_page[s] = (int16_t)pg;
     page_slot[pg] = (int16_t)s;
+    slot_used[s] = ++use_clock;
     map_page(pg, p);
     rom_cache_stats.misses++;
     return p;
+}
+
+void rom_cache_preload(void) {
+    if (!&gba_rom_preload_n)
+        return;
+    for (int i = 0; i < gba_rom_preload_n; i++) {
+        uint32_t pg = gba_rom_preload[i];
+        if (pg >= NPAGES || page_slot[pg] >= 0)
+            continue;
+        int free_slot = 0;
+        for (int k = 0; k < nslots; k++)
+            if (slot_page[k] < 0) { free_slot = 1; break; }
+        if (!free_slot)
+            break;
+        load_page(pg);
+        rom_cache_stats.misses--;
+        rom_cache_stats.preloaded++;
+    }
 }
 
 const void *rom_page16_load(uint32_t va16k, int load) {
@@ -88,8 +123,10 @@ const void *rom_page16_load(uint32_t va16k, int load) {
         return NULL;
     uint32_t pg = off / PAGE;
     int s = page_slot[pg];
-    if (s >= 0)
+    if (s >= 0) {
+        slot_used[s] = ++use_clock;
         return slots + (size_t)s * PAGE;
+    }
     return load ? load_page(pg) : NULL;
 }
 

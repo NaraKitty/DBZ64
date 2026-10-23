@@ -191,6 +191,24 @@ static void dma_transfer(int ch) {
         raise_irq(IRQ_DMA0 << ch);
 }
 
+/* The state an immediate, incrementing 16-bit transfer of n units leaves
+ * behind (the game's SAD/DAD/CNT writes, then the enable bit cleared on
+ * completion), for natives that move the data themselves. */
+void gba_dma_settle16(int ch, uint32_t sad, uint32_t dad, uint32_t n) {
+    uint32_t base = REG_DMA0SAD + 12 * ch;
+    W16(base, (uint16_t)sad);
+    W16(base + 2, (uint16_t)(sad >> 16));
+    W16(base + 4, (uint16_t)dad);
+    W16(base + 6, (uint16_t)(dad >> 16));
+    W16(base + 8, (uint16_t)n);
+    W16(base + 10, 0);
+    dma_t *d = &dma[ch];
+    d->src = ((sad & (ch == 0 ? 0x07FFFFFFu : 0x0FFFFFFFu)) & ~1u) + 2 * n;
+    d->dst = ((dad & (ch == 3 ? 0x0FFFFFFFu : 0x07FFFFFFu)) & ~1u) + 2 * n;
+    d->count = n & (ch == 3 ? 0xFFFFu : 0x3FFFu);
+    d->active_fifo = 0;
+}
+
 static void dma_write_cnt(int ch, uint16_t v) {
     uint32_t base = REG_DMA0SAD + 12 * ch;
     uint16_t old = R16(base + 10);

@@ -34,12 +34,23 @@ void gba_dispatch_init(void) {
     }
 }
 
+/* recent targets: indirect calls (call_via_rX veneers, vtables) hit a few
+ * dozen functions per frame, while the 64KB hash table misses the D-cache */
+#define RECENT 256
+static struct { uint32_t key; gba_func_t fn; } recent[RECENT];
+
 gba_func_t gba_lookup(uint32_t addr, int thumb) {
     uint32_t k = (addr & ~1u) | (thumb ? 1u : 0u);
+    uint32_t c = (k >> 1) & (RECENT - 1);
+    if (recent[c].fn && recent[c].key == k)
+        return recent[c].fn;
     uint32_t h = hash_key(k);
     while (htab[h].fn) {
-        if (htab[h].key == k)
+        if (htab[h].key == k) {
+            recent[c].key = k;
+            recent[c].fn = htab[h].fn;
             return htab[h].fn;
+        }
         h = (h + 1) & (HASH_SIZE - 1);
     }
     return NULL;

@@ -33,6 +33,10 @@ static uint32_t rom_size;
 static int rom_profile;
 static uint32_t rom_page_reads[0x800];
 static int rom_page_first_frame[0x800];
+/* and record which pages each frame reads (rom_trace.bin: one 256-byte
+ * bitmap of the 2048 4KB pages per frame), for ROM cache simulations */
+static uint8_t frame_pages[0x800 / 8];
+static FILE *rom_trace;
 static int frame;
 
 void gba_rom_map_init(void) {
@@ -48,6 +52,7 @@ uint32_t gba_rom_read32(uint32_t a) {
             uint32_t pg = off >> 12;
             if (!rom_page_reads[pg]++)
                 rom_page_first_frame[pg] = frame;
+            frame_pages[pg >> 3] |= (uint8_t)(1u << (pg & 7));
         }
         return rom_words[off >> 2];
     }
@@ -377,6 +382,10 @@ static void finish(void) {
 }
 
 void plat_frame(void) {
+    if (rom_trace) {
+        fwrite(frame_pages, sizeof frame_pages, 1, rom_trace);
+        memset(frame_pages, 0, sizeof frame_pages);
+    }
     frame++;
     frames_since_alarm++;
     uint16_t pressed = 0;
@@ -506,6 +515,11 @@ int main(int argc, char **argv) {
     load_rom(rom);
     load_save();
     t_start = time(NULL);
+    if (rom_profile) {
+        char path[512];
+        snprintf(path, sizeof path, "%s/rom_trace.bin", outdir);
+        rom_trace = fopen(path, "wb");
+    }
     signal(SIGALRM, on_alarm);
     alarm(10);
     gba_boot();
