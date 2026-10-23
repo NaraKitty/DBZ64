@@ -165,7 +165,20 @@ void bg_invalidate(void) {
     nchanged = 0;
 }
 
-void bg_track(uint32_t pages) {
+/* compare chunk c (refs > 0) with its shadow; record it if it changed */
+static inline void track_chunk(uint32_t c) {
+    const uint64_t *v = (const uint64_t *)gba_mem.vram + c * 4;
+    uint64_t *s = (uint64_t *)bg_shadow + c * 4;
+    uint64_t v0 = v[0], v1 = v[1], v2 = v[2], v3 = v[3];
+    if (((v0 ^ s[0]) | (v1 ^ s[1]) | (v2 ^ s[2]) | (v3 ^ s[3])) == 0)
+        return;
+    s[0] = v0; s[1] = v1; s[2] = v2; s[3] = v3;
+    chunk_frame[c] = r_frame;
+    changed[nchanged++] = (uint16_t)c;
+}
+
+void bg_track(uint32_t pages, const uint32_t *units) {
+    uint32_t dirty = pages;
     nchanged = 0;
 #ifdef GBA_RENDER_TRACE
     bg_trace_cmp = 0;
@@ -194,6 +207,23 @@ void bg_track(uint32_t pages) {
             changed[nchanged++] = (uint16_t)(p * 128 + c);
         }
     }
+    /* units noted as changed in pages that are not dirty as a whole */
+    if (units)
+        for (uint32_t w = 0; w < 64; w++) {
+            uint32_t m = units[w];
+            if (!m || (dirty >> (w >> 2)) & 1)
+                continue;
+            while (m) {
+                uint32_t c = w * 32 + (uint32_t)__builtin_ctz(m);
+                m &= m - 1;
+                if (chunk_refs[c]) {
+#ifdef GBA_RENDER_TRACE
+                    bg_trace_cmp++;
+#endif
+                    track_chunk(c);
+                }
+            }
+        }
     r_stats.chunks_changed = (uint32_t)nchanged;
 #ifdef GBA_RENDER_TRACE
     memset(bg_trace_grp, 0, sizeof bg_trace_grp);

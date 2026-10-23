@@ -13,8 +13,9 @@
  *     gba_render_frame(fb, &view);        // only enqueues rdpq commands
  *     rdpq_detach_show();                 // caller presents
  *
- *  - gba_render_frame() calls gba_vram_take_dirty() exactly once per call:
- *    nothing else may consume the VRAM dirty bits.
+ *  - gba_render_frame() calls gba_vram_take_dirty() and
+ *    gba_vram_take_units() exactly once per call: nothing else may consume
+ *    the VRAM dirty bits or the noted units.
  *  - On entry it waits until the RDP has finished the previous
  *    gba_render_frame() (its caches are single-buffered), so the CPU never
  *    rewrites a texture the RDP may still be reading.  Normally the RDP is

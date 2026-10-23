@@ -140,7 +140,8 @@ void *r_raster_buf(int which, uint32_t bytes);
 void bg_init(void);
 void bg_invalidate(void);
 void bg_invalidate_layer(int n);
-void bg_track(uint32_t dirty_pages);            /* pages 0..15 */
+/* pages 0..15; units: noted 32-byte units of BG VRAM (64 words) or NULL */
+void bg_track(uint32_t dirty_pages, const uint32_t *units);
 void bg_draw_text(int n, int fx);
 void bg_draw_affine(int n, int fx);             /* mode 1/2 rotation-scaling BG */
 void bg_draw_bitmap(int mode, uint32_t dispcnt, int fx);   /* modes 3/4/5, BG2 */
@@ -163,7 +164,8 @@ typedef struct {
 
 void obj_init(void);
 void obj_invalidate(void);
-void obj_track(uint32_t dirty_pages);           /* pages 16..23 as bits 0..7 */
+/* pages 16..23 as bits 0..7; units: noted units of OBJ VRAM (32 words) or NULL */
+void obj_track(uint32_t dirty_pages, const uint32_t *units);
 /* parse OAM; returns per-priority lists of visible OBJ indices in draw order (127..0) */
 int obj_parse(uint32_t dispcnt, uint8_t lists[4][128], int counts[4]);
 /* bring the OBJ shadow up to date for the listed sprites (render_obj.c) */

@@ -155,6 +155,28 @@ void gba_mem_touch(uint32_t a, uint32_t len) {
         vram_mark(p);
 }
 
+static uint32_t vram_units[0x18000 / 32 / 32];
+static int vram_units_any;
+
+void gba_vram_note(uint32_t a, uint32_t len) {
+    if ((a >> 24) != 0x06 || !len)
+        return;
+    for (uint32_t p = a & ~31u; p < a + len; p += 32) {
+        uint32_t u = vram_offset(p) >> 5;
+        vram_units[u >> 5] |= 1u << (u & 31);
+    }
+    vram_units_any = 1;
+}
+
+int gba_vram_take_units(uint32_t words[96]) {
+    if (!vram_units_any)
+        return 0;
+    memcpy(words, vram_units, sizeof vram_units);
+    memset(vram_units, 0, sizeof vram_units);
+    vram_units_any = 0;
+    return 1;
+}
+
 /* ------------------------------------------------------------ slow paths */
 
 static inline uint32_t rot_read32(uint32_t aligned_val, uint32_t a) {

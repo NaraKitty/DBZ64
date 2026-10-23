@@ -588,6 +588,10 @@ void gba_render_frame(surface_t *disp, const gba_view_t *view) {
     /* ---- dirty tracking ---- */
     uint64_t t0 = get_ticks();
     uint32_t dirty = gba_vram_take_dirty() & 0xFFFFFFu;
+    /* the 32-byte units writers noted precisely (pages they dirtied as a
+     * whole are in 'dirty') */
+    static uint32_t units[96];
+    int have_units = gba_vram_take_units(units);
     if (force_all) {
         dirty = 0xFFFFFFu;
         bg_invalidate();
@@ -596,8 +600,8 @@ void gba_render_frame(surface_t *disp, const gba_view_t *view) {
     }
     r_stats.dirty_pages = (uint32_t)__builtin_popcount(dirty);
     r_stats.dirty_mask = dirty;
-    bg_track(dirty & 0xFFFFu);
-    obj_track(dirty >> 16);
+    bg_track(dirty & 0xFFFFu, have_units ? units : NULL);
+    obj_track(dirty >> 16, have_units ? units + 64 : NULL);
     r_stats.us_track = us_since(t0);
 
     /* ---- region ---- */

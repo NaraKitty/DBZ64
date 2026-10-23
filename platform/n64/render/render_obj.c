@@ -60,10 +60,13 @@ void obj_invalidate(void) {
     memset(fresh_bits, 0, sizeof fresh_bits);
 }
 
-void obj_track(uint32_t pages) {
+void obj_track(uint32_t pages, const uint32_t *units) {
     for (int p = 0; p < 8; p++)
         if (pages & (1u << p))
             fresh_bits[p * 4] = fresh_bits[p * 4 + 1] = fresh_bits[p * 4 + 2] = fresh_bits[p * 4 + 3] = 0;
+        else if (units)                 /* units noted as changed */
+            for (int w = p * 4; w < p * 4 + 4; w++)
+                fresh_bits[w] &= ~units[w];
     scratch_off = OBJ_IMG_SCRATCH;
 }
 

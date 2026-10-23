@@ -133,18 +133,16 @@ static inline __attribute__((always_inline)) void tile_gather(uint32_t stride_fi
         }
     }
     if (hs && hd) {
-        uint32_t sw = stride / 4;
-        int touched = 0;
+        uint32_t sw = stride / 4, ta = out;
         for (uint32_t band = 0; band < rows; band += 8) {
             r2 = base + band * stride;
             const uint32_t *col = hs + band * sw;
-            for (uint32_t w = 0; w < width; w += 8, col += 2) {
+            for (uint32_t w = 0; w < width; w += 8, col += 2, ta += 64) {
                 const uint32_t *s = col;
-                if (vram && !touched) {
+                if (vram) {
                     /* VRAM tiles that are already there are not written
-                     * (no dirty cache lines); VRAM is marked dirty from the
-                     * first tile that changes (the renderer re-checks every
-                     * dirty page) */
+                     * (no dirty cache lines); the renderer is told which
+                     * tiles changed (gba_vram_note) */
                     uint32_t diff = 0;
                     for (int g = 0; g < 4; g++, s += 2 * sw)
                         diff |= (s[0] ^ hd[4 * g]) | (s[1] ^ hd[4 * g + 1]) |
@@ -157,8 +155,7 @@ static inline __attribute__((always_inline)) void tile_gather(uint32_t stride_fi
                         r2 += 8;
                         continue;
                     }
-                    gba_mem_touch(out, ntiles * 64);
-                    touched = 1;
+                    gba_vram_note(ta, 64);
                 }
                 for (int g = 0; g < 4; g++, s += 2 * sw) {
                     uint32_t a = s[0], b = s[1], c = s[sw], d = s[sw + 1];

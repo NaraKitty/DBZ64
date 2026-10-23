@@ -47,10 +47,10 @@ static inline int plain_range(uint32_t a, uint32_t len) {
 }
 
 /* Copy nw words forward from s to d (both word aligned), as a forward word
- * loop does when d <= s or the ranges do not overlap.  VRAM is marked dirty
- * only where the copy changes it (the renderer re-checks every dirty page).
- * Pieces that host pointers cannot reach use rd32 / wr32 like the guest
- * code. */
+ * loop does when d <= s or the ranges do not overlap.  VRAM words are only
+ * written where they change, and the renderer is told which units changed
+ * (gba_vram_note) instead of re-checking whole dirty pages.  Pieces that
+ * host pointers cannot reach use rd32 / wr32 like the guest code. */
 static void copy_words(uint32_t d, uint32_t s, uint32_t nw) {
     while (nw) {
         uint32_t n = nw, k;
@@ -61,12 +61,19 @@ static void copy_words(uint32_t d, uint32_t s, uint32_t nw) {
         const uint32_t *hs = (const uint32_t *)seg_ptr(s, 0);
         if (hd && hs) {
             if ((d >> 24) == 0x06) {
-                for (k = 0; k < n && hd[k] == hs[k]; k++) { }
-                if (k < n) {
-                    gba_mem_touch(d + 4 * k, 4 * (n - k));
-                    for (; k < n; k++)
+                /* word by word, the same as the forward copy (when d is
+                 * below s, the source words still to come are never
+                 * written first) */
+                uint32_t first = n, last = 0;
+                for (k = 0; k < n; k++)
+                    if (hd[k] != hs[k]) {
                         hd[k] = hs[k];
-                }
+                        if (first == n)
+                            first = k;
+                        last = k;
+                    }
+                if (first < n)
+                    gba_vram_note(d + 4 * first, 4 * (last - first + 1));
             } else {
                 for (k = 0; k < n; k++)
                     hd[k] = hs[k];
@@ -90,12 +97,16 @@ static void fill_words(uint32_t d, uint32_t v, uint32_t nw) {
         uint32_t *hd = (uint32_t *)seg_ptr(d, 1);
         if (hd) {
             if ((d >> 24) == 0x06) {
-                for (k = 0; k < n && hd[k] == v; k++) { }
-                if (k < n) {
-                    gba_mem_touch(d + 4 * k, 4 * (n - k));
-                    for (; k < n; k++)
+                uint32_t first = n, last = 0;
+                for (k = 0; k < n; k++)
+                    if (hd[k] != v) {
                         hd[k] = v;
-                }
+                        if (first == n)
+                            first = k;
+                        last = k;
+                    }
+                if (first < n)
+                    gba_vram_note(d + 4 * first, 4 * (last - first + 1));
             } else {
                 for (k = 0; k < n; k++)
                     hd[k] = v;
@@ -180,7 +191,7 @@ void native_memcpy16(void) {
                 k = 0;
             }
             if (copy)
-                gba_mem_touch(d, bytes);
+                gba_vram_note(d, bytes);
         }
         if (copy) {
             if (so == dof) {
@@ -291,7 +302,7 @@ void native_field_map_stream(void) {
     uint8_t *hv = NULL;
     if (sb + 0x800u <= 0x06010000u)
         hv = (uint8_t *)gba_mem.vram + (sb - 0x06000000u);
-    int touched = 0, last_fast = 0;
+    int last_fast = 0;
     for (int i = 0; i < nseg; i++) {
         const uint8_t *hq = hv ? quad_ptr(q[seg[i].quad]) : NULL;
         last_fast = hq != NULL;
@@ -301,10 +312,7 @@ void native_field_map_stream(void) {
                 /* both blocks word aligned, the row at the same offset */
                 if (!halves_differ(hv, hq, off, n))
                     continue;
-                if (!touched) {
-                    gba_mem_touch(sb, 0x800);
-                    touched = 1;
-                }
+                gba_vram_note(sb + off, 2 * n);
                 for (uint32_t k = 0; k < n; k++)
                     HW(hv, off, k) = HW(hq, off, k);
             } else {

@@ -126,6 +126,14 @@ extern int gba_vram_track_ok;
 uint32_t gba_vram_take_dirty(void);
 /* mark [a, a+len) dirty and writable (bulk writers like DMA call this first) */
 void gba_mem_touch(uint32_t a, uint32_t len);
+/* Precise notes for the renderer: writers that store to VRAM through host
+ * pointers (natives) and know what they changed report the 32-byte units
+ * of [a, a+len) here instead of dirtying whole pages; the page protection
+ * is left alone.  gba_vram_take_units() hands the renderer the units noted
+ * since its last call (bit u of words[u / 32] = VRAM offset 32 * u; 96
+ * words) and returns 0 when there were none. */
+void gba_vram_note(uint32_t a, uint32_t len);
+int gba_vram_take_units(uint32_t words[96]);
 
 /* host pointer for a guest address in a fast page, or NULL */
 static inline void *gba_host_ptr(uint32_t a) {
