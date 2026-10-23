@@ -206,6 +206,8 @@ static int emulate_access(reg_block_t *r, uint32_t va) {
         r->gpr[rt] = res;
     r->epc = next;
     tlb_stats.emulated++;
+    tlb_stats.last_va = va;
+    tlb_stats.last_epc = at;
     return 1;
 }
 

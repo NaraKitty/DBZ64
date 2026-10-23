@@ -8,6 +8,7 @@ typedef struct {
     uint32_t emulated;
     uint32_t vram_marks;
     uint32_t unknown_branch;
+    uint32_t last_va, last_epc;     /* most recent emulated access */
 } tlb_stats_t;
 
 extern tlb_stats_t tlb_stats;

@@ -161,9 +161,14 @@ uint16_t plat_keyinput(void) {
 static int16_t abuf[ABUF_FRAMES * 2];
 static int alen;   /* stereo frames queued */
 
+static uint32_t stat_audio_blocks, stat_audio_drops;
+
 void plat_audio_block(const int8_t *left, const int8_t *right) {
-    if (alen + 16 > ABUF_FRAMES)
+    stat_audio_blocks++;
+    if (alen + 16 > ABUF_FRAMES) {
+        stat_audio_drops++;
         return;   /* the AI is not draining (should not happen) */
+    }
     int16_t *o = abuf + alen * 2;
     for (int i = 0; i < 16; i++) {
         o[2 * i] = (int16_t)(left[i] * 256);
@@ -337,8 +342,12 @@ void plat_frame(void) {
                (double)TICKS_TO_US(now - t_last) / 120000.0, (double)TICKS_TO_US(acc_game) / 120000.0,
                (double)TICKS_TO_US(acc_wait) / 120000.0, (double)TICKS_TO_US(acc_draw) / 120000.0,
                (unsigned long)rom_cache_stats.misses);
-        debugf("f%d: tlb refills %lu emulated %lu vram marks %lu\n", frame,
+        debugf("f%d: audio blocks %lu dropped %lu queued %d\n", frame,
+               (unsigned long)stat_audio_blocks, (unsigned long)stat_audio_drops, alen);
+        stat_audio_blocks = stat_audio_drops = 0;
+        debugf("f%d: tlb refills %lu emulated %lu (last va %08lX pc %08lX) vram marks %lu\n", frame,
                (unsigned long)tlb_stats.rom_refills, (unsigned long)tlb_stats.emulated,
+               (unsigned long)tlb_stats.last_va, (unsigned long)tlb_stats.last_epc,
                (unsigned long)tlb_stats.vram_marks);
         acc_game = acc_wait = acc_draw = 0;
         t_last = now;
