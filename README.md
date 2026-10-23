@@ -1,86 +1,119 @@
-# Dragon Ball Z: The Legacy of Goku II — N64 port
+# Dragon Ball Z on the Nintendo 64
 
-This is a static recompilation of the Game Boy Advance game *Dragon Ball Z: The
-Legacy of Goku II* (USA). It runs natively on the Nintendo 64.
+**Game Boy Advance classics, recompiled to run natively on N64 hardware.**
 
-The game's ARM/Thumb machine code is translated to C ahead of time. That C is
-compiled for the N64's VR4300 CPU and linked against a small runtime that
-models the GBA hardware the game uses:
+![Platform](https://img.shields.io/badge/platform-Nintendo%2064-red)
+![Also runs on](https://img.shields.io/badge/runs%20on-Analogue%203D-black)
+![Resolution](https://img.shields.io/badge/view-320%C3%97240-blue)
+![Target](https://img.shields.io/badge/target-60%20FPS-brightgreen)
+![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial-lightgrey)
 
-- graphics, drawn with the N64's RDP
-- the sound FIFOs feeding the game's own music and sound-effect mixer
-- DMA, timers, interrupts and the EEPROM save
+| Game | Status |
+|---|---|
+| **Dragon Ball Z: The Legacy of Goku II** (USA) | Playable. Runs on real hardware (tested on the Analogue 3D). |
+| **Dragon Ball Z: Buu's Fury** (USA) | In progress: next on the list. |
 
-The game itself is not emulated.
+This is not an emulator running on the N64. Every ARM and Thumb instruction
+of the original cartridge (2,282 functions, 67,500 instructions for *Legacy of
+Goku II*) is translated ahead of time into C. That C is compiled for the N64's
+VR4300 CPU and linked against a runtime that stands in for the GBA hardware:
+graphics, sound, DMA, timers, interrupts and saves. The result is a normal
+N64 ROM that you can play on a console, on an Analogue 3D, or in an
+emulator.
 
-**No game data is included.** You need your own dump of the cartridge. The
-build checks it: USA rev 0, `ALFE`, SHA-1
-`18e0715dec419f3501c301511530d2edcd590f8b`.
+## Highlights
+
+- **A true 320×240 view.** Field maps are not stretched. You see more of the
+  world: the extra margins are drawn from the game's own map data. Enemies,
+  projectiles and NPCs live in the wider view because the game's culling is
+  widened at every check. The HUD and dialogue boxes are moved out to the
+  screen edges. Title, menu and status screens stay pixel-exact and centred.
+- **Hardware-accelerated graphics.** The GBA's tile and sprite engine is
+  rebuilt on the N64's RDP. It covers background layers, sprites, flips,
+  alpha blending and brightness effects. Its output is pixel-identical to a
+  reference software renderer in every frame tested.
+- **The real soundtrack.** The game's own music engine and sound effects run
+  as recompiled code. Its hottest mixing loops are replaced by native C that
+  produces byte-identical audio.
+- **Saves.** The cartridge's EEPROM is emulated and stored in the N64's
+  cartridge SRAM, with a checksum and a backup copy.
+- **Built for real consoles.**
+  - Guest memory is mapped through the VR4300's TLB, so a guest memory access
+    is a single load or store.
+  - Frame skip keeps the game speed and music steady if a frame runs long.
+  - At boot, a self-test checks the CPU features the port relies on and names
+    any that misbehave instead of showing a black screen.
+- **Verified against a reference.**
+  - The PC build of the same recompiled code was compared frame by frame
+    with the mGBA emulator, covering pictures, audio and RAM.
+  - The N64 build matches the PC build pixel for pixel.
 
 ## Controls
 
 | GBA | N64 |
 |---|---|
 | D-pad | D-pad or analog stick |
-| A | A |
-| B | B |
+| A, B | A, B |
 | L | L or Z |
 | R | R |
 | Start | Start |
 | Select | C-Down |
 
-## Display
+C-Up shows a performance overlay with fps, frames drawn, CPU time and
+cartridge reads.
 
-The N64 outputs 320×240. On field maps (exploration and fights) the view is
-truly wider and taller than the GBA's 240×160: more of the authored world
-is visible, and the HUD sits at the screen edges. Title, menu and status
-screens are drawn at their native size, centred.
+## Playing it
 
-C-Up toggles a performance overlay showing fps, game time and draw time.
+**You need your own copy of the game.** No ROM, BIOS or game data is included
+in this repository. The build reads your cartridge dump and checks its SHA-1:
 
-## Requirements
+| Game | Dump | SHA-1 |
+|---|---|---|
+| The Legacy of Goku II | USA, `ALFE` | `18e0715dec419f3501c301511530d2edcd590f8b` |
+| Buu's Fury | USA, `BG3E` | `f1c4b07554d2a3b1ad2f325307051e775ce68087` |
 
-- An N64 with an Expansion Pak (8 MB), an Analogue 3D, or an accurate
-  emulator such as ares.
-- A flash cart that supports 32 KB SRAM saves. SummerCart64 reads the save
-  type from the ROM header.
+The ROM you build contains your dump, so don't share it.
 
-### Analogue 3D
+**Hardware:**
+- An N64 with an Expansion Pak (8 MB), or an Analogue 3D.
+- A flash cart such as SummerCart64 or EverDrive 64.
 
-- Run the ROM from a flash cart. SummerCart64 is known to work well on the
-  Analogue 3D. EverDrive carts need current cart and console firmware.
-- The Analogue 3D's built-in Expansion Pak can be switched off per game.
-  If the ROM says the Expansion Pak is missing, turn it on in the game's
-  settings in the Library.
-- At boot the ROM checks the CPU features the port relies on: TLB
-  mappings and mirrors, unaligned and I/O access emulation, and ROM
-  paging. If one behaves differently, the ROM shows which one instead of a
-  black screen.
-- If VRAM write tracking (TLB modification exceptions) does not work, the
-  renderer re-uploads all of VRAM every frame. This is slower, but the
-  game still runs.
+**Analogue 3D:**
+- The built-in Expansion Pak can be switched off per game. If the ROM says
+  it is missing, turn it on in the game's settings in the Library.
+- SummerCart64 is known to work well. EverDrive carts need current cart
+  firmware.
+
+**EverDrive 64:**
+- The ROM header requests SRAM 256 Kbit saves. If your cart OS ignores
+  that, set the save type to SRAM 32K by hand.
+- Saves are written to the SD card when you reset back to the EverDrive menu,
+  so do that before powering off.
+
+**Emulators:** ares is recommended, as it is accurate enough for the
+TLB-based memory model. Enable the Expansion Pak.
 
 ## Building
 
-You need WSL (Ubuntu) with the [libdragon](https://github.com/DragonMinded/libdragon)
-toolchain (`preview` branch) installed at `/opt/libdragon`, and Python 3 with
-`capstone`.
+You need:
+- WSL (Ubuntu) with the [libdragon](https://github.com/DragonMinded/libdragon)
+  toolchain (`preview` branch) installed at `/opt/libdragon`.
+- Python 3 with `capstone`.
 
-The build uses a space-free path to the repository, so first create a symlink:
+The build runs through a space-free path to the repository:
 
 ```bash
-ln -s "/mnt/c/path/to/DBZ LoG2 N64" ~/dbzn64
+ln -s "/mnt/c/path/to/this/repo" ~/dbzn64
 ```
 
-Then:
-
-1. **Find the game's code** (the ROM is only read):
+1. **Find the game's code.** The ROM is only read:
 
    ```bash
    python3 tools/analyze.py baserom.gba tools/game.toml gen/analysis
    ```
 
-2. **Generate the C code.** It is derived from your ROM, so keep it local:
+2. **Translate it to C.** The output is derived from your ROM, so keep it
+   local:
 
    ```bash
    python3 tools/recomp.py baserom.gba gen/analysis/functions.json gen/c 24
@@ -89,26 +122,69 @@ Then:
 3. **Build the N64 ROM**, which writes `platform/n64/dbz.z64`:
 
    ```bash
-   make -C platform/n64 GEN=$PWD/gen/c BASEROM=$PWD/baserom.gba
+   make -C platform/n64 GEN=$PWD/gen/c BASEROM=$PWD/baserom.gba USE_RDP=1
    ```
 
-   The ROM contains your GBA dump, so don't share it. From Git Bash on
-   Windows, `tools/build_release.sh OUT.z64` runs the same build through
-   WSL. It also removes any leftover test script, which would otherwise
-   boot the ROM in test mode.
+From Git Bash on Windows, `tools/build_release.sh OUT.z64 USE_RDP=1` runs the
+same build through WSL.
 
-A PC test build (`platform/host/build.sh`) runs the same recompiled code
-headless. It writes screenshots, audio and saves for validation. See
-`docs/ARCHITECTURE.md` for how everything fits together.
+A headless PC build (`platform/host/build.sh`) runs the same recompiled code
+and writes PNG screenshots, WAV audio and saves. It is the test bench every
+change is checked on. `docs/ARCHITECTURE.md` explains how everything fits
+together, and `docs/WIDESCREEN.md` covers the 320×240 view.
+
+## How it works
+
+```
+cartridge dump ──analyze.py──▶ functions.json ──recomp.py──▶ C (one function per guest function)
+                                                                   │
+runtime/ (GBA hardware model)  +  platform/n64/ (TLB memory, RDP renderer,
+                                                  audio, saves, input)
+                                                                   │
+                                                                   ▼
+                                                             N64 ROM (.z64)
+```
+
+**Recompiler:**
+- Guest registers become C locals.
+- Compares fuse with their branches.
+- Literal pools fold into constants.
+- Interprocedural register summaries let a call save and reload only the
+  registers it needs.
+- Indirect jumps go through a dispatcher.
+
+**Runtime:**
+- Guest time only advances when the game waits for the next frame.
+- Interrupts, sound DMA and VBlank are delivered at exactly the points the
+  game expects them.
+
+**Renderer:**
+- It caches background tiles in texture memory and redraws only what
+  changed.
+- It reads guest VRAM directly and tracks writes to it through the TLB.
 
 ## Credits
 
-- The technique and several game facts build on the PC recompilation by
-  mstan: [DragonBallZLegacyofGokuIIRecomp](https://github.com/mstan/DragonBallZLegacyofGokuIIRecomp)
-  and [gbarecomp](https://github.com/mstan/gbarecomp).
-- Built with [libdragon](https://github.com/DragonMinded/libdragon).
-- Hardware reference: GBATEK.
+- **mstan**, for the PC recompilations of these games:
+  [DragonBallZLegacyofGokuIIRecomp](https://github.com/mstan/DragonBallZLegacyofGokuIIRecomp),
+  [DragonBallZBuusFuryRecomp](https://github.com/mstan/DragonBallZBuusFuryRecomp)
+  and [gbarecomp](https://github.com/mstan/gbarecomp). Their function seeds,
+  hardware findings and widescreen technique made this port much faster to
+  build.
+- [libdragon](https://github.com/DragonMinded/libdragon), the open-source N64
+  SDK.
+- [ares](https://ares-emu.net/) and [mGBA](https://mgba.io/), used for
+  testing and as a reference.
+- GBATEK, the GBA hardware reference.
 
-*Dragon Ball Z* and related names are trademarks of their respective owners.
-This is a non-commercial preservation and research project, not affiliated
-with Nintendo, Atari, Webfoot Technologies or any rights holder.
+## License and legal
+
+The source code in this repository is licensed under the
+[PolyForm Noncommercial License 1.0.0](LICENSE). Parts of it are based on
+mstan's recomp, which uses the same license.
+
+This is an unofficial, non-commercial fan and preservation project. It is not
+affiliated with or endorsed by Nintendo, Bandai Namco, Atari, Webfoot
+Technologies, Bird Studio/Shueisha, Toei Animation or any other rights
+holder. *Dragon Ball Z* and all related names are trademarks of their
+respective owners. No copyrighted game data is distributed.

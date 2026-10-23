@@ -62,9 +62,18 @@ runtime/*.c (GBA hardware model) + platform/{host,n64}/*.c ◀──────
 - Guest memory is stored as native 32-bit words. Byte accesses use `addr ^ 3`
   and halfword accesses `addr ^ 2` on the big-endian N64.
 - The PC build uses a 4 KB page table.
-- The N64 build will map guest RAM through the VR4300 TLB at the guest's own
-  addresses, so an access is one `lw`. I/O and unmapped addresses fault into a
-  handler.
+- The N64 build maps guest RAM through the VR4300 TLB at the guest's own
+  addresses, so an access is one `lw`.
+  - I/O, unaligned and unmapped accesses fault into a handler
+    (`platform/n64/tlb.c`) that emulates them.
+  - Clean VRAM is write-protected in the TLB, so the first write to a page
+    marks it dirty for the renderer.
+- ROM lives on the cartridge and is paged into a 2 MB cache in 16 KB pages
+  (`platform/n64/rom_n64.c`).
+  - A miss is a PI DMA with interrupts off. The game's hot pages
+    (`game.toml` `[rom] preload`, found with `tools/rom_hotset.py` from host
+    traces) are therefore loaded at boot.
+  - Eviction is LRU-approximate.
 
 **Timing model** (`io.c`):
 - Guest code runs in zero time. Virtual time advances only inside `Halt`
@@ -77,8 +86,22 @@ runtime/*.c (GBA hardware model) + platform/{host,n64}/*.c ◀──────
   the same priority and IE/IF/flag semantics. Handlers run as recompiled code.
 - The BIOS is not executed. SWI 0/2/3/6 are native.
 
+**Native replacements** (`runtime/native.c`, `[[native]]` in `game.toml`):
+- A few hot routines are replaced by C with exactly the same results.
+- Each one sets the memory, registers and flags its callers can observe,
+  taken from the recompiler's summary of the original.
+- They are verified bit-exact on the host: pictures and audio over 8000
+  frames, with and without them.
+
+| Routine | What it does | Why |
+|---|---|---|
+| `0x03000520`, `0x03000704` | The sound mixer's voice loop and clip/pack | Hottest audio code |
+| `0x03000480` | Strided 8x8 sprite-tile gather | Per-access translation overhead |
+| `0x080054A4` | Field-layer tilemap rebuild | Replaces ~256 DMAs per frame, and only writes (and dirties VRAM) when a map really changes |
+
 **Audio:**
-- The game's own tracker and mixer run as recompiled code.
+- The game's own tracker and mixer run as recompiled code, apart from the
+  native routines above.
 - The runtime consumes the two 1 KB ring buffers like the DMA1/DMA2 sound FIFOs
   would: 15,978 Hz, signed 8-bit, FIFO A on the left and FIFO B on the right.
 
@@ -87,17 +110,22 @@ it is stored in 32 KB cartridge SRAM.
 
 ## Measurements (ares, N64 + Expansion Pak)
 
-These figures are game-logic CPU time per frame (recompiled code plus the
-runtime, including IRQs, mixing and DMA), with drawing excluded:
+CPU time per frame. "Game" covers the recompiled code plus the runtime
+(IRQs, mixing, DMA). "Draw" is the RDP renderer's CPU side. The RDP itself
+works in parallel.
 
-| Scene | Time per frame |
-|---|---|
-| Logos and title | 1–2.3 ms |
-| Story cutscenes | ~8 ms |
-| Field gameplay | 8–10.5 ms |
+| Scene (320×240 view, RDP renderer) | Game | Draw | Spare of 16.7 ms |
+|---|---|---|---|
+| Logos and title | 1.2–2.4 ms | 0.5–1 ms | ~13 ms |
+| Field, quiet | 5.5 ms | 1.7 ms | ~9 ms |
+| Field, heaviest stretch measured | 6.6–7.1 ms | 3.8–4.0 ms | ~5.5 ms |
 
-The frame budget is 16.7 ms. The RDP renderer's CPU side has to fit in the
-remainder; the RDP itself works in parallel.
+On that heaviest stretch, the same frame started this round of work at
+10.5 + 7.5 ms, which missed 60 fps. Mid-game cartridge reads went from 76
+to 0 over the scripted playthrough.
+
+When a frame runs over anyway, the platform skips drawing (at most two
+frames in a row) instead of slowing the game down.
 
 **Memory:**
 - Code: 1.66 MB of MIPS from 67.5k guest instructions, with TLB-mapped memory
