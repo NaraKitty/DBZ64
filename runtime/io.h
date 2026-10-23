@@ -80,6 +80,8 @@ void plat_audio_block(const int8_t *left, const int8_t *right);
 void plat_save_block(uint32_t block);
 /* Stop/sleep: return when the wake key combination is held. */
 void plat_sleep(void);
+/* unrecoverable error: show msg and stop (default: abort) */
+void plat_fatal(const char *msg) __attribute__((noreturn));
 /* diagnostics */
 void plat_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 

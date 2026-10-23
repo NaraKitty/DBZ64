@@ -132,10 +132,15 @@ static void fb_dump(int frame, surface_t *s) {
 static uint16_t keyinput = 0x3FF;
 static int frame;
 
+/* C-Up toggles an on-screen performance overlay */
+static int overlay;
+
 static uint16_t read_controller(void) {
     joypad_poll();
     joypad_inputs_t in = joypad_get_inputs(JOYPAD_PORT_1);
     joypad_buttons_t b = in.btn;
+    if (joypad_get_buttons_pressed(JOYPAD_PORT_1).c_up)
+        overlay ^= 1;
     const int T = 40;       /* analog stick threshold (stick range ~ +-85) */
     uint16_t k = 0;
     if (b.a) k |= 1 << 0;
@@ -275,15 +280,46 @@ static void draw_frame_rdp(surface_t *disp, int dump) {
     gba_render_view_native(&view);
     rdpq_attach(disp, NULL);
     gba_render_frame(disp, &view);
-    if (dump) {
+    if (dump || overlay) {
         rdpq_detach_wait();
-        fb_dump(frame, disp);
+        if (overlay)
+            overlay_draw(disp);
+        if (dump)
+            fb_dump(frame, disp);
         display_show(disp);
     } else {
         rdpq_detach_show();
     }
 }
 #endif
+
+/* ------------------------------------------------------------ overlay */
+
+static char overlay_text[64];
+static uint64_t ov_t0, ov_game, ov_draw;
+static int ov_frames;
+
+static void overlay_account(uint64_t game, uint64_t draw) {
+    ov_game += game;
+    ov_draw += draw;
+    if (++ov_frames == 30) {
+        uint64_t now = get_ticks();
+        double secs = (double)TICKS_TO_US(now - ov_t0) / 1e6;
+        snprintf(overlay_text, sizeof overlay_text, "%4.1f fps  game %4.1f ms  draw %4.1f ms",
+                 ov_t0 ? 30.0 / secs : 0.0, (double)TICKS_TO_US(ov_game) / 30000.0,
+                 (double)TICKS_TO_US(ov_draw) / 30000.0);
+        ov_t0 = now;
+        ov_game = ov_draw = 0;
+        ov_frames = 0;
+    }
+}
+
+/* CPU text over a finished frame (the RDP must be done with it) */
+static void overlay_draw(surface_t *disp) {
+    graphics_draw_box(disp, 0, 0, 320, 12, graphics_make_color(0, 0, 0, 255));
+    graphics_set_color(graphics_make_color(255, 255, 0, 255), 0);
+    graphics_draw_text(disp, 4, 2, overlay_text);
+}
 
 /* ------------------------------------------------------------ frame */
 
@@ -326,10 +362,13 @@ void plat_frame(void) {
     if (!test.nodraw || shot_now)
         draw_frame_cpu(disp);
     uint64_t t3 = get_ticks();
+    if (overlay)
+        overlay_draw(disp);
     if (test.active && shot_now)
         fb_dump(frame, disp);
     display_show(disp);
 #endif
+    overlay_account(t_frame_end ? t0 - t_frame_end : 0, t3 - t2);
     acc_wait += t2 - t1;
     acc_draw += t3 - t2;
 
@@ -389,16 +428,53 @@ static void __attribute__((noreturn)) run_game_on_stack(void *top) {
     __builtin_unreachable();
 }
 
+/* Show an error on screen forever (real hardware has no debug console). */
+void plat_fatal(const char *msg) {
+    debugf("FATAL: %s\n", msg);
+    for (;;) {
+        surface_t *d = display_get();
+        graphics_fill_screen(d, graphics_make_color(0, 0, 64, 255));
+        graphics_set_color(graphics_make_color(255, 255, 255, 255), 0);
+        graphics_draw_text(d, 16, 16, "Dragon Ball Z: The Legacy of Goku II");
+        graphics_draw_text(d, 16, 28, "N64 port - cannot continue:");
+        /* wrap the message at 36 columns */
+        char line[40];
+        int y = 52, n = 0;
+        for (const char *p = msg;; p++) {
+            if (*p == '\n' || *p == 0 || n == 36) {
+                line[n] = 0;
+                graphics_draw_text(d, 16, y, line);
+                y += 12;
+                n = 0;
+                if (!*p)
+                    break;
+                if (*p != '\n')
+                    line[n++] = *p;
+                continue;
+            }
+            line[n++] = *p;
+        }
+        display_show(d);
+    }
+}
+
 int main(void) {
     debug_init_emulog();
     display_init(RESOLUTION_320x240, DEPTH_16_BPP, 3, GAMMA_NONE, FILTERS_DISABLED);
+    if (!is_memory_expanded())
+        plat_fatal("This game needs 8MB of RAM (Expansion Pak).\n\n"
+                   "Analogue 3D: open this game's settings in the Library "
+                   "and turn the Expansion Pak on, then restart.\n\n"
+                   "N64: insert an Expansion Pak.");
     rdpq_init();
 #ifdef USE_RDP
     gba_render_init();
 #endif
     joypad_init();
     audio_init(16004, AUDIO_INIT_LATENCY_MS(100));
-    dfs_init(DFS_DEFAULT_LOCATION);
+    if (dfs_init(DFS_DEFAULT_LOCATION) != DFS_ESUCCESS)
+        plat_fatal("The ROM's filesystem (with the GBA game data) was not found. "
+                   "Rebuild the ROM with your own GBA dump.");
     sram_init();
     debugf("DBZ LoG2 N64: memory %d bytes, audio %d Hz\n", get_memory_size(), audio_get_frequency());
     load_test_script();
@@ -406,6 +482,15 @@ int main(void) {
     rom_cache_init(ROM_CACHE_BYTES);
 #ifdef GBA_TLB
     tlb_init();
+    const char *bad = tlb_selftest();
+    if (bad) {
+        static char msg[160];
+        snprintf(msg, sizeof msg, "Hardware self-test failed: %s.\n\n"
+                 "This console/FPGA handles the CPU's TLB differently from an N64.", bad);
+        plat_fatal(msg);
+    }
+    if (!gba_vram_track_ok)
+        debugf("self-test: TLB modification exceptions unavailable, VRAM tracking off\n");
 #endif
     t_last = get_ticks();
     uint8_t *stack = memalign(16, GAME_STACK);

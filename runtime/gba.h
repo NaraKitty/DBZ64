@@ -87,6 +87,8 @@ void gba_wr8_slow(uint32_t a, uint32_t v);
  * was written since the last gba_vram_take_dirty().  Pages are write-
  * protected until their first write in a frame. */
 extern volatile uint32_t gba_vram_dirty;
+/* 0 when the platform cannot track VRAM writes: everything is dirty */
+extern int gba_vram_track_ok;
 uint32_t gba_vram_take_dirty(void);
 /* mark [a, a+len) dirty and writable (bulk writers like DMA call this first) */
 void gba_mem_touch(uint32_t a, uint32_t len);

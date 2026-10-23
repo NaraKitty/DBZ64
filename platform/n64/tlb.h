@@ -15,6 +15,8 @@ extern tlb_stats_t tlb_stats;
 
 /* map guest RAM and install the fault handler (after gba_mem is placed) */
 void tlb_init(void);
+/* verify the mappings and fault handling; NULL = ok, else what failed */
+const char *tlb_selftest(void);
 /* VRAM write protection, 4KB page index (0..23; 16KB granularity inside) */
 void tlb_vram_set_writable(uint32_t page4k, int writable);
 /* forget the mapping of a 16KB ROM page (it is being evicted) */

@@ -233,6 +233,9 @@ static void tlb_exception(exception_t *ex) {
             if (off >= 0x18000u)
                 off -= 0x8000u;
             gba_mem_touch(0x06000000u + off, 1);
+            /* always make progress, even if the dirty bits and the TLB
+             * disagree */
+            tlb_vram_set_writable(off >> 12, 1);
             tlb_stats.vram_marks++;
             return;
         }
@@ -276,4 +279,64 @@ void tlb_init(void) {
     C0_WRITE_WIRED(N_WIRED);
     enable_interrupts();
     prev_handler = register_exception_handler(tlb_exception);
+}
+
+/* ------------------------------------------------------------ self-test */
+
+/* Boot-time check of everything the port relies on in the CPU/TLB, so a
+ * console or FPGA reimplementation that differs fails with a message instead
+ * of a black screen.  Returns NULL when fine.  VRAM write tracking (TLB
+ * modification exceptions) falls back to "everything dirty every frame" if
+ * it does not work, which only costs some renderer time. */
+const char *tlb_selftest(void) {
+    volatile uint32_t *ew = gba_mem.ewram;
+    ew[1] = 0x11223344u;
+    if (rd32(0x02000004u) != 0x11223344u)
+        return "EWRAM read through the TLB";
+    if (rd8(0x02000004u) != 0x44u || rd16(0x02000006u) != 0x1122u)
+        return "byte/halfword lanes";
+    wr32(0x02000008u, 0xCAFEBABEu);
+    if (ew[2] != 0xCAFEBABEu)
+        return "EWRAM write through the TLB";
+    wr8(0x02000009u, 0x5Au);
+    if (ew[2] != 0xCAFE5ABEu)
+        return "EWRAM byte write";
+    gba_mem.iwram[0x7FFC / 4] = 0x03000824u;
+    if (rd32(0x03007FFCu) != 0x03000824u || rd32(0x03FFFFFCu) != 0x03000824u)
+        return "IWRAM mapping or mirror";
+    gba_mem.pal[1] = 0x7FFF0000u;
+    gba_mem.oam[1] = 0x12345678u;
+    if (rd32(0x05000004u) != 0x7FFF0000u || rd32(0x07000004u) != 0x12345678u)
+        return "palette/OAM mapping";
+    for (uint32_t pg = 0; pg < 6; pg++) {
+        gba_mem.vram[pg * 0x1000u] = 0xA5000000u + pg;
+        if (rd32(0x06000000u + pg * 0x4000u) != 0xA5000000u + pg)
+            return "VRAM mapping";
+    }
+    if (rd32(0x06018000u) != 0xA5000004u)
+        return "VRAM mirror";
+    /* faults: unaligned load (ARM rotate), I/O read, ROM page-in */
+    ew[3] = 0x44332211u;
+    if (rd32(0x0200000Du) != 0x11443322u)
+        return "unaligned load emulation";
+    uint32_t e0 = tlb_stats.emulated;
+    (void)rd16(0x04000006u);           /* VCOUNT: emulated I/O read */
+    if (tlb_stats.emulated == e0)
+        return "I/O access did not fault";
+    if (rd32(0x08000000u) != 0xEA00002Eu)
+        return "ROM paging (rom.bin missing or not word-swapped?)";
+    /* VRAM write tracking */
+    gba_vram_take_dirty();
+    wr16(0x06000010u, 0x1234u);
+    uint32_t v = *(volatile uint16_t *)((uint8_t *)gba_mem.vram + (0x10u ^ GBA_HX));
+    if (v != 0x1234u || !(gba_vram_dirty & 1u)) {
+        gba_vram_track_ok = 0;
+        vram_writable = 0x3F;
+        vram_rewrite();
+        wr16(0x06000010u, 0x4321u);
+        v = *(volatile uint16_t *)((uint8_t *)gba_mem.vram + (0x10u ^ GBA_HX));
+        if (v != 0x4321u)
+            return "VRAM write through the TLB";
+    }
+    return NULL;
 }

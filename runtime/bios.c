@@ -209,5 +209,14 @@ void gba_panic(const char *fmt, ...) {
         plat_log("r%-2d=%08X r%-2d=%08X r%-2d=%08X r%-2d=%08X", i, (unsigned)cpu.r[i], i + 1,
                  (unsigned)cpu.r[i + 1], i + 2, (unsigned)cpu.r[i + 2], i + 3, (unsigned)cpu.r[i + 3]);
     plat_log("next_pc=%08X cpsr=%08X", (unsigned)cpu.next_pc, (unsigned)cpu_get_cpsr());
+    char msg[320];
+    snprintf(msg, sizeof msg, "%s\n\nguest pc %08X lr %08X sp %08X", buf,
+             (unsigned)cpu.next_pc, (unsigned)cpu.r[14], (unsigned)cpu.r[13]);
+    plat_fatal(msg);
+}
+
+/* platforms with a screen override this to show the message */
+__attribute__((weak, noreturn)) void plat_fatal(const char *msg) {
+    (void)msg;
     abort();
 }

@@ -30,6 +30,15 @@ void gba_mem_map_rom_page(uint32_t page, const void *host) {
     }
 }
 
+#ifdef GBA_TLB
+/* generated code writes VRAM through the TLB: protection works on 16KB
+ * pages there, so a mark covers the four 4KB pages of the TLB page */
+void tlb_vram_set_writable(uint32_t page4k, int writable);
+#define VRAM_GRAIN 4u
+#else
+#define VRAM_GRAIN 1u
+#endif
+
 void gba_mem_init(void) {
     memset(&gba_mem, 0, sizeof(gba_mem));
     for (int i = 0; i < 0x10000; i++) {
@@ -57,6 +66,10 @@ void gba_mem_init(void) {
     /* invariant: a page's dirty bit is set exactly when it is writable;
      * everything starts dirty, gba_vram_take_dirty() re-protects */
     gba_vram_dirty = 0xFFFFFF;
+#ifdef GBA_TLB
+    for (uint32_t page = 0; page < 24; page += 4)
+        tlb_vram_set_writable(page, 1);
+#endif
     gba_rom_map_init();
 }
 
@@ -78,14 +91,6 @@ static void vram_set_protect(uint32_t page, int protect) {
     }
 }
 
-#ifdef GBA_TLB
-/* generated code writes VRAM through the TLB: protection works on 16KB
- * pages there, so a mark covers the four 4KB pages of the TLB page */
-void tlb_vram_set_writable(uint32_t page4k, int writable);
-#define VRAM_GRAIN 4u
-#else
-#define VRAM_GRAIN 1u
-#endif
 
 static inline uint32_t vram_offset(uint32_t a) {
     uint32_t off = a & 0x1FFFF;
@@ -104,7 +109,11 @@ static inline void vram_mark(uint32_t a) {
     }
 }
 
+int gba_vram_track_ok = 1;
+
 uint32_t gba_vram_take_dirty(void) {
+    if (!gba_vram_track_ok)
+        return 0xFFFFFF;   /* no write tracking: treat everything as dirty */
     uint32_t d = gba_vram_dirty;
     gba_vram_dirty = 0;
     for (uint32_t page = 0; page < 24; page++)
