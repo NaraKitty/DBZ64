@@ -20,7 +20,20 @@ cp "$SCRIPT" /d/dbz-n64/build/$BD/filesystem/test.txt
 MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu -- bash -c "export N64_INST=/opt/libdragon; cd $WSLREPO/platform/n64 && touch /mnt/d/dbz-n64/build/$BD/filesystem/test.txt && make -j12 REPO=$WSLREPO GEN=$GENDIR BUILD_DIR=/mnt/d/dbz-n64/build/$BD $* > /mnt/d/dbz-n64/build/n64_make_$BD.log 2>&1 || { grep -E 'error' /mnt/d/dbz-n64/build/n64_make_$BD.log | head; exit 1; }; cp dbz.z64 /mnt/d/dbz-n64/build/$BD/dbz_test.z64"
 rm -f /d/dbz-n64/build/$BD/filesystem/test.txt
 cd "/d/Games/ARES N64 EMULATOR"
-timeout "$T" ./ares.exe --settings-file 'D:\dbz-n64\scratch\n64platform\ares_settings.bml' \
-    --system "Nintendo 64" --no-file-prompt "D:\\dbz-n64\\build\\${BD}\\dbz_test.z64" > "$RUN/ares.log" 2>&1 || true
+./ares.exe --settings-file 'D:\dbz-n64\scratch\n64platform\ares_settings.bml' \
+    --system "Nintendo 64" --no-file-prompt "D:\\dbz-n64\\build\\${BD}\\dbz_test.z64" > "$RUN/ares.log" 2>&1 &
+ARES=$!
+# ares sometimes ignores the exit request after framebuffer dumps: stop it
+# once the test reports completion (or a fatal error), or at the timeout
+for ((i = 0; i < T; i++)); do
+    kill -0 $ARES 2>/dev/null || break
+    if grep -aq "^test done\|^FATAL\|^PANIC" "$RUN/ares.log"; then
+        sleep 2
+        break
+    fi
+    sleep 1
+done
+kill $ARES 2>/dev/null || true
+wait $ARES 2>/dev/null || true
 grep -a -v "^FB " "$RUN/ares.log" | tail -40
 python "D:/dbz-n64/scratch/n64platform/fbdump2png.py" "$RUN/ares.log" "$RUN/shot" | tail -5

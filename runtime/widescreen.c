@@ -45,6 +45,7 @@ int ws_debug_flags;
 #define CAM_SHOWN_L    (CAM + 0x2C)
 #define CAM_SHOWN_T    (CAM + 0x30)
 #define CAM_PRESENTS   (CAM + 0x34)
+#define CAM_MAP        (CAM + 0x50)
 #define CAM_W          (CAM + 0x54)
 #define CAM_H          (CAM + 0x58)
 #define LAYER_SET      0x0300107Cu
@@ -103,6 +104,8 @@ static uint32_t last_presents;       /* CAM_PRESENTS at the previous VBlank */
 static int frames_since_present = 99;
 static uint32_t vblank_count;
 static uint32_t view_requested;      /* vblank_count when ws_get_view() last gave the field view */
+static uint32_t last_map_key;        /* map pointer/size of the field shown (0: none) */
+static uint32_t map_generation;      /* ws_map_generation() */
 
 /* the widening is only applied when the extended view is really presented */
 static inline int widen_active(void) {
@@ -827,10 +830,18 @@ void ws_frame_begin(void) {
     if (!field_on) {
         for (int bg = 0; bg < 4; bg++) lay[bg].type = LAYER_NONE;
         OX = OY = 0;
+        last_map_key = 0;
         return;
     }
     int L = (int)iw32(CAM_SHOWN_L), T = (int)iw32(CAM_SHOWN_T);
     int W = map_w(), H = map_h(), X0, Y0;
+    /* a different map (or the field view coming back) invalidates margins
+     * a renderer may have cached */
+    uint32_t key = iw32(CAM_MAP) ^ ((uint32_t)W << 16) ^ (uint32_t)H;
+    if (key != last_map_key || !last_map_key) {
+        last_map_key = key ? key : 1;
+        map_generation++;
+    }
     view_rect(L, T, W, H, &X0, &Y0);
     OX = X0 - L;
     OY = Y0 - T;
@@ -840,6 +851,10 @@ void ws_frame_begin(void) {
 
 int ws_field_view_active(void) {
     return field_on;
+}
+
+uint32_t ws_map_generation(void) {
+    return map_generation;
 }
 
 void ws_native_view(ws_view_t *v) {

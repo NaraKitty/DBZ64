@@ -97,6 +97,10 @@ void ws_native_view(ws_view_t *v);
 /* 1 while this frame uses the extended field view */
 int ws_field_view_active(void);
 
+/* changes whenever the field map changes (or the field view comes back):
+ * renderers that cache bg_entry results must drop them then */
+uint32_t ws_map_generation(void);
+
 /* ---- generated-code hooks (tools/game.toml) ---- */
 
 /* [[override_load]]: camera bound loaded at a render-cull / despawn site */
