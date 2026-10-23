@@ -7,7 +7,8 @@ toward the screen edges. Every other screen (title, menus, status, logos and
 the mode-1 map) shows the native 240x160 frame centred at (40,40) with a black
 border.
 
-The code is in `runtime/widescreen.[ch]`, and the hook sites are in `tools/game.toml`
+The interface is `runtime/widescreen.h`. The LoG2 code is in
+`games/log2/widescreen.c`, and the hook sites are in `games/log2/game.toml`
 (section "320x240 view"). The host reference renderer is
 `ppu_soft_render_view()`.
 
@@ -187,7 +188,7 @@ The class comes from the object's vtable.
 The HUD lands in the top-left corner. Dialogue boxes and banners land at bottom-centre, or
 top-centre when the game puts them at the top.
 
-## Culling and despawn (`tools/game.toml`)
+## Culling and despawn (`games/log2/game.toml`)
 
 The camera rectangle is at `0x0300109C`: L, T, R=L+240, B=T+160.
 

@@ -1,11 +1,11 @@
-"""Improved code discovery for DBZ LoG II (ALFE) - analyze2.py
+"""Code discovery for the Webfoot DBZ GBA games (games/<game>/game.toml).
 
-Successor of tools/analyze.py.  Adds:
+Features:
   * game.toml seed loader (extra_func / jump_table / code_copy)
   * per-function literal-pool / ADR tracking (byte classification)
   * Thumb PIC constant tracking (ldr rX,=k ; add rX,pc)
   * relative C++ vtables (target = vptr + [vptr+4k]); bases = vptr literals
-    (absolute words into rodata 08023720-08026044), contiguous slots up to
+    (absolute words into [layout] rodata), contiguous slots up to
     the next base / first non-code entry
   * Thumb switch tables: cmp #N; bcs; adr; ldrb|ldrh; lsls #1; add pc,rT
   * absolute pointer harvesting (whole ROM) with trial-walk validation
@@ -21,7 +21,7 @@ Successor of tools/analyze.py.  Adds:
   * toml [[extra_func]] seeds that are BL return addresses (reference-runtime
     resume points) are listed but not used as entries unless WITH_RET_SITES=1
 
-Usage: python analyze2.py ROM GAME_TOML OUT_DIR [extra_entries.txt]
+Usage: python tools/analyze.py ROM games/GAME/game.toml OUT_DIR [extra_entries.txt]
 Output: OUT_DIR/functions.json (analyze.py schema + origin/indirect/lits keys,
         top-level callvia/vtables/summary), summary.json, coverage.txt,
         indirect.txt, jumptables.txt, vtables.txt, features.txt,
@@ -78,6 +78,7 @@ def load_toml(path):
       funcs:  [(addr, thumb, source_addr|None, resume, note)]
       tables: [(addr, stride, count, fmt, entries_mode, name)]
       copies: [(runtime_start, source_start, size, name)]
+      false:  [(addr, thumb, note)] ([[false_entry]]: never a function entry)
       program: the [program] table
     """
     t = tomllib.load(open(path, 'rb'))
@@ -93,7 +94,9 @@ def load_toml(path):
     copies = []
     for e in t.get('code_copy', []):
         copies.append((e['runtime_start'], e['source_start'], e['size'], e.get('name', '')))
-    return {'funcs': funcs, 'tables': tables, 'copies': copies,
+    false = [(e['addr'], e.get('mode', 'thumb') == 'thumb', e.get('note', ''))
+             for e in t.get('false_entry', [])]
+    return {'funcs': funcs, 'tables': tables, 'copies': copies, 'false': false,
             'program': t.get('program', {})}
 
 
@@ -677,16 +680,40 @@ class Analyzer:
 
 
 # ===================================================================== driver
-# Game-specific layout of the executable scan window (verified by hand, see
-# report): these ranges are never code even though they sit inside it.
-STATIC_DATA_RANGES = [
-    (0x08000004, 0x080000C0, 'cartridge header'),
-    (0x08023588, 0x08023690, '.ctors (pcrel_thumb, 66 entries)'),
-    (0x08023690, 0x0802369C, '.dtors (pcrel_thumb, 3 entries)'),
-]
-RODATA = (0x08023720, 0x08026044, 'rodata: relative vtables + ARM this-adjust thunks')
-IWRAM_CODE = (0x03000000, 0x03000C04)   # ARM code + pools; 0x03000C04..0x03000E1C is .data
-# ldr ip,[pc,#8]; sub r0,r0,#n; add ip,pc,ip; bx ip; .word rel
+# Section layout of the cartridge image, from the game toml's [layout] table
+# (games/<game>/game.toml; verified by hand from crt0, the .ctors/.dtors
+# runners and the veneer block):
+#   text        .text [lo, hi) (crt0 ends at text[0])
+#   ctors/dtors constructor / destructor tables (never code)
+#   veneers     Thumb/ARM interworking veneers
+#   rodata      relative vtables + ARM this-adjust thunks (never gap-filled)
+#   text2       start of the second text block (it ends at the last code)
+#   iwram_code  ARM code + pools of the crt0 IWRAM image
+#   iwram_data  the image's .data (reported only)
+LAYOUT_KEYS = ('text', 'ctors', 'dtors', 'veneers', 'rodata', 'text2', 'iwram_code', 'iwram_data')
+LAYOUT = {}
+
+
+def load_layout(path):
+    t = tomllib.load(open(path, 'rb')).get('layout', {})
+    missing = [k for k in LAYOUT_KEYS if k not in t]
+    if missing:
+        sys.exit('%s: [layout] needs %s' % (path, ', '.join(missing)))
+    for k, v in t.items():
+        LAYOUT[k] = tuple(v) if isinstance(v, list) else v
+    global STATIC_DATA_RANGES, RODATA, IWRAM_CODE, TEXT2
+    STATIC_DATA_RANGES = [
+        (0x08000004, 0x080000C0, 'cartridge header'),
+        (LAYOUT['ctors'][0], LAYOUT['ctors'][1], '.ctors (pcrel_thumb)'),
+        (LAYOUT['dtors'][0], LAYOUT['dtors'][1], '.dtors (pcrel_thumb)'),
+    ]
+    RODATA = (LAYOUT['rodata'][0], LAYOUT['rodata'][1], 'rodata: relative vtables + ARM this-adjust thunks')
+    IWRAM_CODE = LAYOUT['iwram_code']
+    TEXT2 = LAYOUT['text2']
+
+
+STATIC_DATA_RANGES = RODATA = IWRAM_CODE = TEXT2 = None
+# ldr ip,[pc,#8]; sub r0,r0,#n (or sub r1,r1,#n); add ip,pc,ip; bx ip; .word rel
 THUNK_W0, THUNK_W2, THUNK_W3 = 0xE59FC008, 0xE08FC00C, 0xE12FFF1C
 
 
@@ -702,6 +729,7 @@ class Driver:
     def __init__(self, rom_path, toml_path, extra=None, verbose=False, use_toml_funcs=True,
                  use_toml_tables=True, include_ret_sites=False):
         self.rom_path = rom_path
+        load_layout(toml_path)
         self.T = load_toml(toml_path)
         self.include_ret_sites = include_ret_sites
         self.ret_sites = []          # toml seeds that are BL return addresses
@@ -713,6 +741,10 @@ class Driver:
         self.verbose = verbose
         self.known_bases = set()
         self.blacklist = {}          # (addr, thumb) -> reason
+        for addr, th, note in self.T['false']:
+            # e.g. a data word that happens to point into the middle of a
+            # function the pointer harvest cannot tell from an entry
+            self.blacklist[(addr, th)] = 'toml false_entry: ' + note
         self.history = []
 
     # ------------------------------------------------ setup
@@ -895,7 +927,9 @@ class Driver:
             if an.cs.u32(a) != THUNK_W0:
                 continue
             w1, w2, w3 = an.cs.u32(a + 4), an.cs.u32(a + 8), an.cs.u32(a + 12)
-            if w2 == THUNK_W2 and w3 == THUNK_W3 and (w1 & 0xFFFFF000) == 0xE2400000:
+            # sub r0,r0,#n (this in r0) or sub r1,r1,#n (struct-returning
+            # methods: this in r1)
+            if w2 == THUNK_W2 and w3 == THUNK_W3 and (w1 & 0xFFFFF000) in (0xE2400000, 0xE2411000):
                 rel = an.cs.u32(a + 16)
                 tgt = (a + 16 + rel) & 0xffffffff
                 adj = ror32_imm(w1 & 0xfff)
@@ -1031,16 +1065,20 @@ class Driver:
         bad = {}
         # weak pointer-derived entries that turned out to sit inside a body
         # walked from an earlier, independent entry are coincidental words
+        # (a literal in code outranks gap fill, though: data that decodes as
+        # code may run into a real function)
         insn_owner = defaultdict(set)
         for key, f in an.funcs.items():
             for a in f.insns:
                 if a != key[0]:
                     insn_owner[(a, key[1])].add(key)
         for key, f in an.funcs.items():
-            if an.entries.get(key) not in ('rom-ptr', 'code-const'):
+            origin = an.entries.get(key)
+            if origin not in ('rom-ptr', 'code-const'):
                 continue
+            weaker = ('rom-ptr', 'code-const') + (('gap-fill', 'gap-fill-arm') if origin == 'code-const' else ())
             outer = [o for o in insn_owner.get(key, ()) if o[0] < key[0] and
-                     an.entries.get(o) not in ('rom-ptr', 'code-const')]
+                     an.entries.get(o) not in weaker]
             if outer:
                 bad[key] = (key[0], set(outer))
         for key, f in an.funcs.items():
@@ -1082,14 +1120,14 @@ class Driver:
         self.stats['2_consts_vtables'] = (len(an.funcs), len(self.unique_insns()))
         self.harvest_rom_pointers()
         self.stats['3_rom_pointers'] = (len(an.funcs), len(self.unique_insns()))
-        self.text_ranges = [(0x08000158, 0x08023588), (0x08026044, self.code_end())]
+        self.text_ranges = [LAYOUT['text'], (TEXT2, self.code_end())]
         self.gap_fill_arm(IWRAM_CODE)
         for rnd in range(10):
             before = len(an.funcs)
             self.gap_fill(self.text_ranges)
             self.harvest_consts()
             self.harvest_vtables()
-            self.text_ranges[1] = (0x08026044, self.code_end())
+            self.text_ranges[1] = (TEXT2, self.code_end())
             if len(an.funcs) == before:
                 break
         self.stats['4_gap_fill'] = (len(an.funcs), len(self.unique_insns()))
@@ -1111,16 +1149,16 @@ class Driver:
         self.stats['5_final'] = (len(self.an.funcs), len(self.unique_insns()))
 
     def code_end(self):
-        """End of the second text block (0x08026044..): last insn + its pool."""
+        """End of the second text block ([layout] text2..): last insn + its pool."""
         an = self.an
         hi = 0
         for f in an.funcs.values():
             for a, ins in f.insns.items():
-                if 0x08026044 <= a < an.scan_hi:
+                if TEXT2 <= a < an.scan_hi:
                     hi = max(hi, a + ins.size)
         for f in an.funcs.values():
             for la, sz in f.lits.items():
-                if 0x08026044 <= la < an.scan_hi and la < hi + 0x400:
+                if TEXT2 <= la < an.scan_hi and la < hi + 0x400:
                     hi = max(hi, la + sz)
         return (hi + 3) & ~3
 
@@ -1236,16 +1274,18 @@ def write_reports(d, outdir):
 
     # ---------------------------------------------------------- coverage
     cov = d.covered()
+    Lt, Lc, Ld, Lv, Lr, Li, Lid = (LAYOUT[k] for k in ('text', 'ctors', 'dtors', 'veneers', 'rodata',
+                                                       'iwram_code', 'iwram_data'))
     regions = [
-        ('crt0+header 08000000-08000158', 0x08000000, 0x08000158),
-        ('.text 08000158-08023588', 0x08000158, 0x08023588),
-        ('ctors/dtors 08023588-0802369C', 0x08023588, 0x0802369C),
-        ('veneers 0802369C-08023720', 0x0802369C, 0x08023720),
-        ('rodata vtables 08023720-08026044', 0x08023720, 0x08026044),
-        ('.text2 08026044-%08X' % d.code_end(), 0x08026044, d.code_end()),
-        ('tail data %08X-08030000' % d.code_end(), d.code_end(), 0x08030000),
-        ('IWRAM code 03000000-03000C04', 0x03000000, 0x03000C04),
-        ('IWRAM .data 03000C04-03000E1C', 0x03000C04, 0x03000E1C),
+        ('crt0+header 08000000-%08X' % Lt[0], 0x08000000, Lt[0]),
+        ('.text %08X-%08X' % Lt, Lt[0], Lt[1]),
+        ('ctors/dtors %08X-%08X' % (Lc[0], Ld[1]), Lc[0], Ld[1]),
+        ('veneers %08X-%08X' % Lv, Lv[0], Lv[1]),
+        ('rodata vtables %08X-%08X' % Lr, Lr[0], Lr[1]),
+        ('.text2 %08X-%08X' % (TEXT2, d.code_end()), TEXT2, d.code_end()),
+        ('tail data %08X-%08X' % (d.code_end(), an.scan_hi), d.code_end(), an.scan_hi),
+        ('IWRAM code %08X-%08X' % Li, Li[0], Li[1]),
+        ('IWRAM .data %08X-%08X' % Lid, Lid[0], Lid[1]),
     ]
     consts = d.all_consts()
     unknown_runs = []
@@ -1257,6 +1297,10 @@ def write_reports(d, outdir):
             if a in cov:
                 c[cov[a]] += 2
         for s, e in d.gaps(lo, hi, cov):
+            if not an.cs.valid(s, e - s):
+                # declared .data outside the code-copy overlay (not mapped)
+                c['data(declared)'] += e - s
+                continue
             vals = [an.cs.u16(a) for a in range(s, e, 2)]
             if all(v in (0, 0x46C0) for v in vals):
                 c['padding'] += e - s
@@ -1264,7 +1308,7 @@ def write_reports(d, outdir):
             if lo == 0x08000000 and s < 0x080000C0:
                 c['header'] += e - s
                 continue
-            if an.in_data(s) or (0x03000C04 <= s < 0x03000E1C):
+            if an.in_data(s) or (Lid[0] <= s < Lid[1]):
                 c['data(declared)'] += e - s
                 continue
             raw = bytes(an.rom.data[an.cs.phys(s) - 0x08000000: an.cs.phys(s) - 0x08000000 + (e - s)])
@@ -1273,7 +1317,7 @@ def write_reports(d, outdir):
                 kind = 'string'
             elif any(s <= v < e for v in consts):
                 kind = 'data(referenced)'
-            elif lo >= 0x08026044 and s >= d.code_end():
+            elif lo >= TEXT2 and s >= d.code_end():
                 kind = 'data(after code)'
             else:
                 kind = 'unknown'
@@ -1289,7 +1333,7 @@ def write_reports(d, outdir):
         for k, v in c.items():
             totals[k] += v
     # aggregated over the executable text (crt0 + .text + veneers + .text2)
-    text_lo_hi = [(0x080000C0, 0x08023588), (0x0802369C, 0x08023720), (0x08026044, d.code_end())]
+    text_lo_hi = [(0x080000C0, Lt[1]), Lv, (TEXT2, d.code_end())]
     tc = Counter()
     for lo, hi in text_lo_hi:
         for a in range(lo, hi, 2):
@@ -1311,8 +1355,8 @@ def write_reports(d, outdir):
     summary['text_explained_pct'] = round(100.0 * (tsize - unkb) / tsize, 3)
     with W('coverage.txt') as fh:
         fh.write('\n'.join(covlines) + '\n\n')
-        fh.write('executable text (080000C0-08023588, 0802369C-08023720, 08026044-%08X): %d bytes\n' % (
-            d.code_end(), tsize))
+        fh.write('executable text (%s): %d bytes\n' % (
+            ', '.join('%08X-%08X' % r for r in text_lo_hi), tsize))
         fh.write('  code %d (%.2f%%), literal %d, inline tables %d, padding %d, strings/data %d, unknown %d\n\n' % (
             tc['code'], 100.0 * tc['code'] / tsize, tc['literal'], tc['table'], padb, strb, unkb))
         fh.write('non-code runs inside the scan window (start end kind first-bytes):\n')
@@ -1412,7 +1456,7 @@ def write_reports(d, outdir):
                                             ' '.join('%08x' % s for s in swi_sites[(th, num)][:24])))
         fh.write('\n==== special instructions (MRS/MSR, SWP, long multiply, LDM/STM ^, ldr/str pc, lone BL halves)\n')
         fh.write('\n'.join(special) + '\n')
-        fh.write('\n==== static stores into IWRAM code 03000000-03000C04 (insn, target, bytes, function)\n')
+        fh.write('\n==== static stores into IWRAM code %08X-%08X (insn, target, bytes, function)\n' % IWRAM_CODE)
         for r in sorted(iw_writes):
             fh.write('  %08x -> %08x (%d) in %08x\n' % r)
         fh.write('\n==== memory SWIs with constant r1 (addr, swi, r0, r1, r2)\n')

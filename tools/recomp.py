@@ -24,6 +24,7 @@ Model
 """
 import json
 import os
+import re
 import sys
 from collections import defaultdict
 
@@ -35,6 +36,11 @@ from recomp_consts import (FLAGS, ALLREGS, LOGICAL, TESTS, COND_FLAGS,  # noqa: 
 from abi import Summaries  # noqa: E402
 
 
+# assignments to the temporaries a fused compare-and-branch reads
+LAZY_SUB_WRITE = re.compile(r'\b(fa|fb|fr)\s*=(?!=)')
+LAZY_FR_WRITE = re.compile(r'\bfr\s*=(?!=)')
+
+
 def fname(addr, thumb):
     return ('T_%08X' if thumb else 'A_%08X') % addr
 
@@ -44,6 +50,11 @@ def hx(v):
 
 
 # ------------------------------------------------------------ hooks
+
+# --trace: every function starts with 'if (TRACE_ENTER(addr)) return;' (a
+# no-op unless built with -DRECOMP_TRACE and a gba_trace_enter(), which can
+# log entries or hand functions to the interpreter; runtime/recomp.h)
+TRACE = '--trace' in sys.argv
 
 # pc -> C function name; filled from game.toml
 OVERRIDE_LOAD = {}      # value loaded at pc is passed through func(value)
@@ -745,6 +756,8 @@ class FuncGen:
         self.e('  uint32_t r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14;')
         self.e('  uint32_t n, z, c, v, fa, fb, fr, ft, ft2, t;')
         self.e('  const uint32_t ret = cpu.r[14];')
+        if TRACE:
+            self.e('  if (TRACE_ENTER(%s)) return;' % hx(self.addr | self.T))
         if getattr(self, 'warn_entry', False):
             self.e('  gba_unexpected(%s);' % hx(self.addr | self.T))
         entry_live = self.live[self.addr]
@@ -757,6 +770,15 @@ class FuncGen:
             self.e('  n = z = c = v = 0;')
         # registers that are never loaded still need a defined value for
         # sync_out paths that store them (they are in written, so loaded).
+        # The body is emitted in address order: when code below the entry
+        # belongs to the function (a shared tail reached by a branch), jump
+        # to the entry first, unless the entry is an unconditional branch to
+        # the first instruction anyway.
+        first = self.addrs[0] if self.addrs else self.addr
+        if first != self.addr:
+            ei = self.ins[self.addr]
+            if not (self.kind[self.addr] == 'branch' and ei.cond == COND_AL and ei.target == first):
+                self.e('  goto L_%08X;' % self.addr)
         prev_falls = True
         self.lazy = None
         self.kconst = {}
@@ -777,7 +799,7 @@ class FuncGen:
             body = self.emit_ins(i)
             for b in body:
                 self.e('  ' + b)
-            self.update_lazy(i)
+            self.update_lazy(i, body)
             self.kconst_update(i)
             prev_falls = self.falls_through(i)
             prev_addr = a
@@ -818,11 +840,20 @@ class FuncGen:
             return False
         return True
 
-    def update_lazy(self, i):
+    def update_lazy(self, i, body=()):
         k = self.kind[i.addr]
         if k != 'normal':
             self.lazy = None
             return
+        if self.lazy is not None and not getattr(i, 's', False):
+            # the temporaries a fused condition reads ('sub': fa, fb, fr;
+            # 'logic': fr) were reused as scratch, e.g. by the address
+            # temporary of an LDM between 'cmp' and 'bne': later conditions
+            # must read the flags
+            pat = LAZY_SUB_WRITE if self.lazy == 'sub' else LAZY_FR_WRITE
+            if any(pat.search(b) for b in body):
+                self.lazy = None
+                return
         if i.op == 'dp' and i.s:
             if i.cond != COND_AL:
                 self.lazy = None
@@ -840,9 +871,32 @@ class FuncGen:
         return fmt(i).replace('*/', '* /')
 
 
+def game_toml(argv):
+    """--config PATH, or --game NAME for games/NAME/game.toml (default log2)."""
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(repo, 'games', 'log2', 'game.toml')
+    for k, a in enumerate(argv):
+        if a == '--game' and k + 1 < len(argv):
+            path = os.path.join(repo, 'games', argv[k + 1], 'game.toml')
+        elif a == '--config' and k + 1 < len(argv):
+            path = argv[k + 1]
+    return path
+
+
 def main():
-    rom_path, fjson, outdir = sys.argv[1:4]
-    shards = int(sys.argv[4]) if len(sys.argv) > 4 else 16
+    """recomp.py ROM functions.json OUTDIR [SHARDS] [--game NAME | --config TOML] [--dump-abi] [--trace]"""
+    args, k = [], 1
+    while k < len(sys.argv):
+        if sys.argv[k] in ('--game', '--config'):
+            k += 2
+            continue
+        if not sys.argv[k].startswith('--'):
+            args.append(sys.argv[k])
+        k += 1
+    rom_path, fjson, outdir = args[:3]
+    shards = int(args[3]) if len(args) > 3 else 16
+    import tomllib
+    cfg = tomllib.load(open(game_toml(sys.argv), 'rb'))
     data = json.load(open(fjson))
     rom = Rom(rom_path)
     cs = CodeSpace(rom)
@@ -858,14 +912,18 @@ def main():
         gens[(f['addr'], f['thumb'])] = g
     # Address-taken functions are the possible targets of indirect calls.  The
     # IRQ code is only entered by the runtime (with a full context save), so it
-    # does not constrain the indirect-call summary.
-    runtime_only = {0x03000824, 0x03000934, 0x03000798, 0x03000950}
+    # does not constrain the indirect-call summary (game.toml [recomp]).
+    # Entries seeded as computed-jump targets inside a function (toml
+    # [[extra_func]] resume = true) are not called indirectly either, and
+    # neither is code only gap fill found: no BL, pointer, vtable or code
+    # constant anywhere refers to it (dead code, or data that decodes as code
+    # and falls into a real function).
+    runtime_only = set(cfg.get('recomp', {}).get('runtime_only', []))
+    not_taken = ('call', 'tail', 'reset', 'toml-resume', 'gap-fill', 'gap-fill-arm', None)
     taken = set()
     for f in funcs:
-        if f.get('origin') not in ('call', 'tail', 'reset', None) and f['addr'] not in runtime_only:
+        if f.get('origin') not in not_taken and f['addr'] not in runtime_only:
             taken.add((f['addr'], f['thumb']))
-    import tomllib
-    cfg = tomllib.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'game.toml'), 'rb'))
     noreturn = {(e['addr'], e.get('mode', 'thumb') == 'thumb') for e in cfg.get('noreturn', [])}
     for e in cfg.get('override_load', []):
         OVERRIDE_LOAD[e['pc']] = e['func']
@@ -931,6 +989,13 @@ def main():
         for f, _ in sorted(bodies, key=lambda x: (x[0]['addr'], x[0]['thumb'])):
             fh.write('  { %s, %s },\n' % (hx(f['addr'] | (1 if f['thumb'] else 0)), fname(f['addr'], f['thumb'])))
         fh.write('};\nconst unsigned gba_func_count = %d;\n' % len(bodies))
+        # what each function may change (its ABI summary): the interpreter
+        # and the top-level loop put back the rest after recompiled code
+        # returns (runtime/dispatch.h)
+        fh.write('const uint32_t gba_func_mod[] = {\n')
+        for f, _ in sorted(bodies, key=lambda x: (x[0]['addr'], x[0]['thumb'])):
+            fh.write('  0x%05X,\n' % (summ.MOD[(f['addr'], f['thumb'])] & (ALLREGS | FLAGS)))
+        fh.write('};\n')
     # ROM cache boot preload list (game.toml [rom] preload, 16KB pages)
     pre = cfg.get('rom', {}).get('preload', [])
     with open(os.path.join(outdir, 'gen_rom_preload.c'), 'w') as fh:

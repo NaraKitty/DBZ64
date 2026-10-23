@@ -84,19 +84,22 @@ void gba_io_write8(uint32_t off, uint32_t v);
 int gba_jump(uint32_t target);
 void gba_exc_return(void);                /* movs pc / ldm ^ with pc */
 void gba_undefined(uint32_t pc, uint32_t raw);
-/* entered a function the recompiler assumed unreachable (see tools/game.toml) */
+/* entered a function the recompiler assumed unreachable (games/<game>/game.toml [[assume_unreachable]]) */
 void gba_unexpected(uint32_t addr);
 void gba_msr(uint32_t value, uint32_t mask, int spsr);
 uint32_t gba_mrs(int spsr);
 void gba_stm_user(uint32_t addr, uint32_t list);
 void gba_ldm_user(uint32_t addr, uint32_t list);
 
-/* per-function call depth guard (debug builds) */
+/* Debug builds (tools/recomp.py --trace, -DRECOMP_TRACE): every function
+ * starts with 'if (TRACE_ENTER(addr)) return;'.  The debug harness's
+ * gba_trace_enter() can record the entry, or run the function in the
+ * interpreter instead (it then returns nonzero). */
 #ifdef RECOMP_TRACE
-void gba_trace_enter(uint32_t addr);
+int gba_trace_enter(uint32_t addr);
 #define TRACE_ENTER(a) gba_trace_enter(a)
 #else
-#define TRACE_ENTER(a) ((void)0)
+#define TRACE_ENTER(a) 0
 #endif
 
 #endif

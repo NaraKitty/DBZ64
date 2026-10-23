@@ -2,13 +2,14 @@
  * io.c - I/O registers, DMA, timers, IRQs, EEPROM and the Halt-driven
  * frame scheduler.  See io.h for the timing model.
  *
- * Game-specific facts this relies on (DBZ Legacy of Goku II, verified by
- * disassembly):
- *  - IRQ vector [0x03007FFC] = 0x03000824, an ARM dispatcher in IWRAM.  We
- *    replace it with irq_dispatch() below: same priority (DMA2 first, then
- *    bits 0..12), same IE/IF/flag-word handling, handlers called in System
- *    mode with lr = 0x03000951 / r4 = 0x03000934 as the original sets them.
- *  - Handler table at 0x03000E3C, "fired" flag word (u16) at 0x03000E74.
+ * Engine facts this relies on (the Webfoot DBZ games, verified by
+ * disassembly; the addresses are per game, in games/<game>/game.h):
+ *  - IRQ vector [0x03007FFC] = GAME_IRQ_DISPATCHER, an ARM dispatcher in
+ *    IWRAM.  We replace it with gba_irq_service() below: same priority
+ *    (GAME_IRQ_ORDER), same IE/IF/flag-word handling, handlers called in
+ *    System mode with lr = GAME_IRQ_RET_LR as the original sets it.
+ *  - Handler table at GAME_IRQ_TABLE, "fired" flag word (u16) at
+ *    GAME_IRQ_FLAGS.
  *  - Audio: DMA1/DMA2 in FIFO mode feeding FIFO A (left) / B (right), Timer 0
  *    reload 0xFBE6 (1050 cycles per sample); DMA2 raises an IRQ per
  *    16-sample burst.
@@ -17,11 +18,14 @@
 #include <setjmp.h>
 #include "io.h"
 #include "widescreen.h"
+#include "game.h"
 
-#define IRQ_TABLE   0x03000E3Cu
-#define IRQ_FLAGS   0x03000E74u
-#define IRQ_RET_LR  0x03000951u      /* Thumb 'bx r4' trampoline */
-#define IRQ_RET_R4  0x03000934u      /* dispatcher continuation */
+#define IRQ_TABLE   GAME_IRQ_TABLE
+#define IRQ_FLAGS   GAME_IRQ_FLAGS
+#define IRQ_RET_LR  GAME_IRQ_RET_LR  /* Thumb 'bx r4' trampoline */
+
+/* IRQ sources in the order the game's dispatcher tests them */
+static const uint16_t irq_order[] = { GAME_IRQ_ORDER };
 
 uint32_t gba_frame_cycle;
 uint32_t gba_frame_count;
@@ -299,12 +303,13 @@ static void audio_block(void) {
 
 static int in_irq;
 
-/* Registers as the dispatcher leaves them at 'bx r0' (0x03000930): handlers
- * rely on some of them (the sound handler restarts the FIFO DMAs relative to
+/* Registers as the dispatcher leaves them at its 'bx r0': handlers rely on
+ * some of them (the sound handler restarts the FIFO DMAs relative to
  * r3 = 0x04000200).  It runs in System mode on the interrupted stack after
- * pushing one word there.  The dispatcher passes its continuation in r4 and
- * the sound handler returns with 'bx r4'; that continuation unwinds a frame
- * we never build, so r4 gets the same return sentinel as lr. */
+ * pushing one word there.  The dispatcher passes its continuation
+ * (GAME_IRQ_RET_R4) in r4 and the sound handler returns with 'bx r4'; that
+ * continuation unwinds a frame we never build, so r4 gets the same return
+ * sentinel as lr. */
 static void run_handler(uint32_t handler, uint32_t ack_word, int dma2) {
     gba_cpu_t saved = cpu;
     cpu.r[0] = handler;
@@ -321,7 +326,9 @@ static void run_handler(uint32_t handler, uint32_t ack_word, int dma2) {
     cpu = saved;
 }
 
-/* Native version of the IWRAM dispatcher at 0x03000824. */
+/* Native version of the game's IWRAM dispatcher (GAME_IRQ_DISPATCHER).
+ * DMA2 (sound) is served with IE unchanged; any other source is masked in IE
+ * while its handler runs. */
 void gba_irq_service(void) {
     if (in_irq)
         return;
@@ -332,23 +339,20 @@ void gba_irq_service(void) {
         uint16_t act = ie & R16(REG_IF);
         if (!(ime & 1) || !act)
             break;
-        uint16_t bit;
-        uint32_t idx;
-        if (act & 0x0400) {
-            bit = 0x0400;
-            idx = 0x28;
-        } else {
-            uint16_t m = act & 0x1BFF;
-            if (!m) {
-                /* only the GamePak IRQ: the original hangs; just ack it */
-                W16(REG_IF, R16(REG_IF) & ~act);
+        uint16_t bit = 0;
+        for (unsigned k = 0; k < sizeof irq_order / sizeof irq_order[0]; k++)
+            if (act & irq_order[k]) {
+                bit = irq_order[k];
                 break;
             }
-            int b = __builtin_ctz(m);
-            bit = (uint16_t)(1u << b);
-            idx = (uint32_t)b * 4;
-            W16(REG_IE, ie & ~bit);
+        if (!bit) {
+            /* only the GamePak IRQ: the original hangs; just ack it */
+            W16(REG_IF, R16(REG_IF) & ~act);
+            break;
         }
+        uint32_t idx = (uint32_t)__builtin_ctz(bit) * 4;
+        if (bit != 0x0400)
+            W16(REG_IE, ie & ~bit);
         W16(REG_IF, R16(REG_IF) & ~bit);
         *(uint16_t *)((uint8_t *)gba_mem.iwram + ((IRQ_FLAGS & 0x7FFE) ^ GBA_HX)) |= bit;
         uint32_t handler = gba_mem.iwram[((IRQ_TABLE + idx) & 0x7FFC) >> 2];

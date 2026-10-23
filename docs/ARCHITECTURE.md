@@ -12,14 +12,75 @@ The recompiler regenerates the C code from the user's own ROM.
 
 ```
 baserom.gba ──tools/analyze.py──▶ functions.json ──tools/recomp.py──▶ gen/*.c
-                                                                       │
-runtime/*.c (GBA hardware model) + platform/{host,n64}/*.c ◀───────────┘
+              games/<game>/game.toml ──┘                                │
+runtime/*.c (GBA hardware model) + games/<game>/*.c                     │
+  + platform/{host,n64}/*.c ◀───────────────────────────────────────────┘
         │
         ├─ host build (WSL gcc): headless PNG/WAV harness for validation
         └─ N64 build (libdragon): dbz.z64
 ```
 
+### Games (`games/<game>/`)
+The tools, runtime and platforms are shared by Webfoot's GBA *Dragon Ball Z*
+games (the same engine and toolchain). Each game directory holds:
+- `game.toml`: code discovery and code generation facts for the tools: the
+  section `[layout]`, the crt0 `[[code_copy]]`, jump tables, extra entries,
+  `noreturn`/`assume_unreachable` library functions, `[[native]]`
+  replacements, the IWRAM IRQ code only the runtime enters (`[recomp]`), and
+  the game's hook sites.
+- `game.h`: what the runtime and the platforms need: the IRQ dispatcher's
+  handler table, flags word, return sentinel and test order, the ROM identity
+  (game code, SHA-1), the N64 cartridge title and SRAM save magic.
+- C sources compiled into that game's build (for LoG2, the 320×240 field view
+  `widescreen.c`).
+
+`GAME=log2|buu` selects the game in `platform/host/build.sh`, the N64
+Makefile and the run scripts; `tools/recomp.py --game NAME` and
+`tools/mkrom.py --game NAME` read the same directory. Builds of different
+games need different output directories.
+
+### Buu's Fury (`games/buu/`)
+The same engine with about twice LoG2's code: 4435 functions and 142k guest
+instructions (3.3 MB of MIPS), plus Nintendo's link-cable and wireless
+adapter libraries and ARM soft-float code. What differs from LoG2:
+- Section layout and IWRAM image (ROM 0x087B79A4, 0x1004 bytes; only the
+  code part, up to 0x03000F44, is declared to the recompiler).
+- The IRQ dispatcher (0x03000B6C) tests Serial and Timer3 right after DMA2.
+- EEPROM library V124 (64 Kbit, as LoG2); SWI 0x0B CpuSet in the link
+  libraries; the IWRAM routines memcpy32/memset32/memcpy16/memset16 replace
+  most DMA3 copies. memcpy16, a Duff's device and the game's hottest
+  routine, is native (`games/buu/native.c`).
+- The sound engine, mixer and FIFO model are LoG2's (`native_mix_voice` and
+  `native_clip` apply unchanged).
+- No 320×240 field view yet: `games/buu/widescreen.c` always gives the
+  native view.
+
+Status: the host build plays from power-on through the logos, title, a new
+game and the story intro into gameplay with no dispatch misses. It matches
+the interpreter (RAM identical at every 500th VBlank outside the dead stack,
+identical frames, audio and save). Against the mGBA oracle, with input
+replayed by key read (the gameplay script, three 60,000-frame random-input
+runs, credits, sleep, soft reset, multiplayer menu, idle title): 99.9% of
+the pictures match exactly. The rest are frames where the game writes
+during scan-out on hardware. The game state in RAM is identical apart from
+sound-mixer timing, the stack and a CPU-load meter (0x03000FEC). Saves
+match byte for byte. Option
+changes are saved to EEPROM and read back at boot. The N64 build (TLB, CPU
+renderer) runs the same script in ares with frames identical to the host's
+and keeps the save in SRAM. Game logic in ares: logos 1–2.5 ms, title
+~7 ms, story scenes 3–7.5 ms, field gameplay 5.8–6.2 ms per frame. Code is
+3.27 MB of MIPS and BSS 1.6 MB.
+
+Open: the field view; the RDP renderer for Buu's Fury (the CPU renderer
+needs ~70 ms per frame); register summaries of the ARM soft-float routines
+(their save/restore of r4–r11 is not recognised, which widens the indirect
+call summary by r8–r11); the link-cable and wireless modes only reach
+"Waiting for a friend..." (cancel works; serial is not modelled); a game
+progress save (only the options block has been written so far); coverage
+beyond the start of the story (about 1,060 of the 4,435 functions have run).
+
 ### Code discovery (`tools/analyze.py`)
+For LoG2 (`games/log2/game.toml`):
 - Recursive descent from crt0, AgbMain (0x08000158) and the constructor table
   at 0x08023588.
 - Seeds from the reference recomp's `game.toml` (753 verified function entries
@@ -82,8 +143,9 @@ runtime/*.c (GBA hardware model) + platform/{host,n64}/*.c ◀──────
   - an audio FIFO block every 16 samples (DMA2 IRQ)
   - HBlank lines, only while the Mode-7 scene's HBlank IRQ is enabled
   - VBlank at line 160: render and present first, then raise the VBlank IRQ
-- The IWRAM IRQ dispatcher at 0x03000824 is replaced by a native version with
-  the same priority and IE/IF/flag semantics. Handlers run as recompiled code.
+- The game's IWRAM IRQ dispatcher (LoG2 0x03000824; `GAME_IRQ_*` in
+  `game.h`) is replaced by a native version with the same priority and
+  IE/IF/flag semantics. Handlers run as recompiled code.
 - The BIOS is not executed. SWI 0/2/3/6 are native.
 
 **Native replacements** (`runtime/native.c`, `[[native]]` in `game.toml`):
@@ -142,6 +204,30 @@ IRQ handler's DMA register writes, which use a register-relative address.
   originals.
 - Frames are compared against the software reference renderer, and that
   renderer was fuzzed against an independent model.
+
+## Debugging recompiled code (host)
+
+Guest time only advances in Halt, so the host build, the N64 build and the
+interpreter all see exactly the same game state at every VBlank. That makes
+the interpreter (`runtime/interp.c`) a reference for the recompiled code:
+
+1. Generate a traced copy of the code: `tools/recomp.py ... OUTDIR --game G
+   --trace`. Every function then starts with `if (TRACE_ENTER(addr)) return;`.
+2. Build it with `DEBUG=1 GAME=G platform/host/build.sh OUTDIR BUILD`, which
+   adds `platform/host/debug.c`: it keeps the last 4096 function entries and
+   prints them when the run dies.
+3. `GBA_INTERP_FN=lo-hi[,lo-hi...]` runs the functions entered in those
+   ranges, and everything they call, in the interpreter. (A dispatch miss
+   interprets only the missing function: the interpreter puts back the
+   registers its recompiled callees preserve, see `runtime/dispatch.h`.)
+   `08000000-08000001` (the reset entry) interprets the whole game. If a
+   failure disappears when a range is interpreted, bisect the range down to
+   the function whose recompiled code misbehaves.
+4. `--dump-ram F,F,..` writes IWRAM and EWRAM at those VBlanks
+   (`ram_NNNNN.bin`, the mGBA oracle's layout). Compare a recompiled and an
+   interpreted run, or the oracle. Only the dead stack area may differ:
+   recompiled code does not keep dead registers' values, which functions
+   still push.
 
 ## N64 platform (`platform/n64/`)
 

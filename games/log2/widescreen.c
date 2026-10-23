@@ -1,6 +1,6 @@
 /*
- * widescreen.c - 320x240 field view.  See widescreen.h for the interface and
- * docs/WIDESCREEN.md for the design.
+ * widescreen.c - 320x240 field view of LoG2.  See runtime/widescreen.h for
+ * the interface and docs/WIDESCREEN.md for the design.
  *
  * Game facts used here (DBZ Legacy of Goku II USA, verified by disassembly;
  * see docs/WIDESCREEN.md for the derivations):

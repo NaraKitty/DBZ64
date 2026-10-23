@@ -1,0 +1,347 @@
+# Dragon Ball Z: Buu's Fury (USA, BG3E, rev 0)
+# SHA-1 f1c4b07554d2a3b1ad2f325307051e775ce68087
+#
+# Discovery metadata for tools/analyze.py and tools/recomp.py.  The same
+# Webfoot engine and toolchain as LoG2 (games/log2); every address was found
+# by disassembling this ROM and matched against the LoG2 equivalent, and
+# cross-checked with github.com/mstan/DragonBallZBuusFuryRecomp's function
+# list.  The runtime's view of the game is in game.h next to this file.
+
+[program]
+id = "BG3E"
+load_address = 0x08000000
+size = 0x00800000
+entry_pc = 0x08000000
+# The code reaches well past LoG2's: .text ends at 0x08048ED8, the second
+# (Thumb) text block runs from 0x0804E490 and is followed by ARM library code
+# (constant division, soft-float) up to its pools at 0x08054FE8.  Data from
+# 0x08055000.
+aot_scan_start = 0x080000C0
+aot_scan_end = 0x08055000
+
+# Section layout (tools/analyze.py), from crt0, the .ctors/.dtors runners and
+# the veneer block.  AgbMain is 0x0800419C (crt0 lr), not the start of .text.
+[layout]
+text = [0x08000158, 0x08048ED8]
+ctors = [0x08048ED8, 0x080490F8]       # 136 entries, runner 0x08046AEC
+dtors = [0x080490F8, 0x08049114]       # 7 entries, runner 0x08046AC0
+veneers = [0x08049114, 0x080491F0]     # crt0 jumps to 0x08049114 (-> 0x08046AED)
+rodata = [0x080491F0, 0x0804E490]      # relative vtables + ARM this-adjust thunks
+text2 = 0x0804E490
+iwram_code = [0x03000000, 0x03000F44]  # ARM code + pools of the IWRAM image
+iwram_data = [0x03000F44, 0x03001004]  # its .data (IRQ table at 0x03000FB0)
+
+# IWRAM code entered only by the runtime's native IRQ dispatcher (game.h):
+# the dispatcher, its continuation, the sound DMA2 handler and the 'bx r4'
+# return trampoline.
+[recomp]
+runtime_only = [0x03000B6C, 0x03000C7C, 0x03000AE0, 0x03000C98]
+
+# crt0 (0x080000C0) DMA3-copies 0x1004 bytes ROM 0x087B79A4 -> IWRAM
+# 0x03000000 and zero-fills .bss 0x03001004..0x030052FC.  Only the code and
+# pools are declared: the recompiler folds loads from the overlay as
+# constants, and 0x03000F44.. is mutable .data (game variables, the global
+# scene pointer 0x03000F90, the IRQ table).
+[[code_copy]]
+runtime_start = 0x03000000
+source_start = 0x087B79A4
+size = 0x00000F44
+name = "iwram_support_code"
+
+# .ctors, walked by the constructor runner at 0x08046AEC
+[[jump_table]]
+addr = 0x08048ED8
+stride = 4
+count = 136
+format = "pcrel_thumb"
+entries_mode = "thumb"
+name = "runtime_initializers"
+
+# .dtors, walked (downwards) by 0x08046AC0
+[[jump_table]]
+addr = 0x080490F8
+stride = 4
+count = 7
+format = "pcrel_thumb"
+entries_mode = "thumb"
+name = "runtime_destructors"
+
+# script-engine native function table: 296 Thumb pointers with a NULL at
+# 0x08055504
+[[jump_table]]
+addr = 0x08055098
+stride = 4
+count = 283
+format = "abs32"
+entries_mode = "auto"
+name = "script_natives_1"
+
+[[jump_table]]
+addr = 0x08055508
+stride = 4
+count = 13
+format = "abs32"
+entries_mode = "auto"
+name = "script_natives_2"
+
+# sound engine: command handlers and callbacks
+[[jump_table]]
+addr = 0x087B6904
+stride = 4
+count = 32
+format = "abs32"
+entries_mode = "auto"
+name = "sound_commands"
+
+[[jump_table]]
+addr = 0x087B6EC4
+stride = 4
+count = 6
+format = "abs32"
+entries_mode = "auto"
+name = "sound_callbacks"
+
+# Hand-written ARM entry points the IRQ code reaches by computed branches
+# (LoG2 0x03000798 / 0x03000824 / 0x03000950)
+[[extra_func]]
+addr = 0x03000AE0
+source_addr = 0x087B8484
+mode = "arm"
+note = "DMA2 (sound) IRQ callback; state 0x03003898, continuation 0x0803F297"
+
+[[extra_func]]
+addr = 0x03000B6C
+source_addr = 0x087B8510
+mode = "arm"
+note = "IRQ dispatcher (replaced natively, kept for reference)"
+
+[[extra_func]]
+addr = 0x03000C98
+source_addr = 0x087B863C
+mode = "thumb"
+note = "bx r4 trampoline used as IRQ handler return"
+
+[[extra_func]]
+addr = 0x0803FA38
+mode = "thumb"
+note = "Sleep routine (SWI 3 Stop; LoG2 0x08021388)"
+
+# Computed jumps the analyzer cannot bound: every possible target is an
+# entry, so the dispatch block reaches it through gba_jump().
+#
+# memcpy16 0x030007FC (Duff's device): 'add pc, pc, r3, lsl #2' at
+# 0x03000804 with r3 = (16 - n) & 0xE -> 0x0300080C + 8k.
+[[extra_func]]
+addr = 0x0300080C
+source_addr = 0x087B81B0
+mode = "arm"
+resume = true
+note = "memcpy16 Duff entry, n%16 == 0"
+
+[[extra_func]]
+addr = 0x03000814
+mode = "arm"
+resume = true
+
+[[extra_func]]
+addr = 0x0300081C
+mode = "arm"
+resume = true
+
+[[extra_func]]
+addr = 0x03000824
+mode = "arm"
+resume = true
+
+[[extra_func]]
+addr = 0x0300082C
+mode = "arm"
+resume = true
+
+[[extra_func]]
+addr = 0x03000834
+mode = "arm"
+resume = true
+
+[[extra_func]]
+addr = 0x0300083C
+mode = "arm"
+resume = true
+
+[[extra_func]]
+addr = 0x03000844
+mode = "arm"
+resume = true
+
+# 64-bit shift-subtract division 0x080476AC (libgcc, ARM): two unrolled
+# loops entered by 'add pc, pc, r0, lsl #2|3' at 0x08047800 / 0x08047934.
+# The targets are 0x08047808 + 12k (k = 0..7) and 0x0804793C + 24k
+# (k = 0..3); the carry flag at entry matters (adcs).
+[[extra_func]]
+addr = 0x08047808
+mode = "arm"
+resume = true
+
+[[extra_func]]
+addr = 0x08047814
+mode = "arm"
+resume = true
+
+[[extra_func]]
+addr = 0x08047820
+mode = "arm"
+resume = true
+
+[[extra_func]]
+addr = 0x0804782C
+mode = "arm"
+resume = true
+
+[[extra_func]]
+addr = 0x08047838
+mode = "arm"
+resume = true
+
+[[extra_func]]
+addr = 0x08047844
+mode = "arm"
+resume = true
+
+[[extra_func]]
+addr = 0x08047850
+mode = "arm"
+resume = true
+
+[[extra_func]]
+addr = 0x0804785C
+mode = "arm"
+resume = true
+
+[[extra_func]]
+addr = 0x0804793C
+mode = "arm"
+resume = true
+
+[[extra_func]]
+addr = 0x08047954
+mode = "arm"
+resume = true
+
+[[extra_func]]
+addr = 0x0804796C
+mode = "arm"
+resume = true
+
+[[extra_func]]
+addr = 0x08047984
+mode = "arm"
+resume = true
+
+# Real functions blacklisted in the first pass because a transient false
+# entry (0x080413F0, inside a literal pool) overlapped them.
+[[extra_func]]
+addr = 0x080413F4
+mode = "thumb"
+note = "link library: push {r3,lr}; bl 0x080454EA; pop"
+
+[[extra_func]]
+addr = 0x0804168C
+mode = "thumb"
+note = "link library: SIO command dispatcher (byte switch at 0x08041700)"
+
+# An uncalled function: without a seed, compressed-data words that happen to
+# point into its middle (0x0853F7CC = 0x0804060D, ...) are harvested as entries
+# before gap fill finds it.  Such an entry reads r5-r7 and stack slots it never
+# set, which widens the ABI summary of every indirect call.
+[[extra_func]]
+addr = 0x080403EC
+mode = "thumb"
+note = "uncalled (dead) function, push {r0,r1,r4-r7,lr}"
+
+# Addresses that are not function entries although the analyzer finds them.
+# The wireless library's literal 0x030000F0 (0x08043CC8) and a stray
+# 0x030000E0 point into the IWRAM LZ decoder 0x03000040: not code pointers.
+[[false_entry]]
+addr = 0x030000E0
+mode = "arm"
+note = "inside the LZ decoder 0x03000040"
+
+[[false_entry]]
+addr = 0x030000F0
+mode = "arm"
+note = "inside the LZ decoder 0x03000040 (literal at 0x08043CC8)"
+
+# the 'mov r0, r0' after memcpy16's 'add pc' (gap fill)
+[[false_entry]]
+addr = 0x03000808
+mode = "arm"
+note = "padding after the computed jump at 0x03000804"
+
+# Gap fill tries Thumb first; these are data inside the ARM library code.
+[[false_entry]]
+addr = 0x08053F58
+mode = "thumb"
+note = "reciprocal table of the ARM division 0x08053CF8 (add r7,pc,#0x1C0)"
+
+[[false_entry]]
+addr = 0x08047422
+mode = "thumb"
+note = "libm double constants"
+
+[[false_entry]]
+addr = 0x08047680
+mode = "thumb"
+note = "libm double constants (the code starts at 0x08047688)"
+
+[[false_entry]]
+addr = 0x08047F64
+mode = "thumb"
+note = "libm double constants before raise() 0x08047F6C"
+
+[[false_entry]]
+addr = 0x08048118
+mode = "thumb"
+note = "string 'ro', 'Overflow'"
+
+# Functions that never return (newlib/libgcc error and exit paths).
+[[noreturn]]
+addr = 0x08047FD8
+mode = "arm"
+note = "_exit (semihosting SYS_EXIT); Thumb stub 0x08047FD4 (LoG2 0x08022C68)"
+
+[[noreturn]]
+addr = 0x08047A1C
+mode = "arm"
+note = "__div0 -> _exit(2) (LoG2 0x08022A8C)"
+
+[[noreturn]]
+addr = 0x08046AB0
+mode = "thumb"
+note = "exit(): runs destructors then _exit (LoG2 0x08021D38)"
+
+# Paths assumed never to run (summaries treat them as noreturn); the generated
+# code logs loudly on entry so a wrong assumption is caught.
+[[assume_unreachable]]
+addr = 0x080491E4
+mode = "arm"
+note = "veneer to newlib raise(SIGFPE) on the soft-float exception path (LoG2 0x08023714)"
+
+# memcpy16 (Duff's device, the game's hottest routine): native.c in this
+# directory.  The computed-jump targets above keep the recompiled original
+# working if this entry is removed.
+[[native]]
+addr = 0x030007FC
+mode = "arm"
+func = "native_memcpy16"
+
+# Hot hand-written routines replaced by native C (runtime/native.c): both are
+# byte-identical to LoG2's 0x03000520 / 0x03000704.
+[[native]]
+addr = 0x03000868
+mode = "arm"
+func = "native_mix_voice"
+
+[[native]]
+addr = 0x03000A4C
+mode = "arm"
+func = "native_clip"

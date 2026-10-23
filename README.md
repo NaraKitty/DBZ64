@@ -109,29 +109,53 @@ ln -s "/mnt/c/path/to/this/repo" ~/dbzn64
 1. **Find the game's code.** The ROM is only read:
 
    ```bash
-   python3 tools/analyze.py baserom.gba tools/game.toml gen/analysis
+   python3 tools/analyze.py baserom.gba games/log2/game.toml gen/analysis
    ```
 
 2. **Translate it to C.** The output is derived from your ROM, so keep it
    local:
 
    ```bash
-   python3 tools/recomp.py baserom.gba gen/analysis/functions.json gen/c 24
+   python3 tools/recomp.py baserom.gba gen/analysis/functions.json gen/c 24 --game log2
    ```
 
-3. **Build the N64 ROM**, which writes `platform/n64/dbz.z64`:
+3. **Build the N64 ROM** from a build directory outside the repository.
+   `dbz.z64` is written to the current directory:
 
    ```bash
-   make -C platform/n64 GEN=$PWD/gen/c BASEROM=$PWD/baserom.gba USE_RDP=1
+   mkdir -p ../n64build && cd ../n64build
+   make -f ~/dbzn64/platform/n64/Makefile GAME=log2 BUILD_DIR=$PWD \
+        GEN=$OLDPWD/gen/c BASEROM=$OLDPWD/baserom.gba
    ```
 
-From Git Bash on Windows, `tools/build_release.sh OUT.z64 USE_RDP=1` runs the
-same build through WSL.
+   The ROM contains your GBA dump, so don't share it, and keep it out of
+   synced folders. From Git Bash on Windows, `tools/build_release.sh OUT.z64`
+   runs the same build through WSL. It also removes any leftover test
+   script, which would otherwise boot the ROM in test mode. The RDP renderer
+   is the default; `USE_RDP=0` builds the CPU reference renderer.
 
-A headless PC build (`platform/host/build.sh`) runs the same recompiled code
-and writes PNG screenshots, WAV audio and saves. It is the test bench every
-change is checked on. `docs/ARCHITECTURE.md` explains how everything fits
-together, and `docs/WIDESCREEN.md` covers the 320×240 view.
+A PC test build (`GAME=log2 platform/host/build.sh GEN OUT`) runs the same
+recompiled code headless. It writes screenshots, audio and saves for
+validation; it is the test bench every change is checked on.
+`docs/ARCHITECTURE.md` explains how everything fits together, and
+`docs/WIDESCREEN.md` covers the 320×240 view.
+
+### Games
+
+The framework is shared by Webfoot's GBA *Dragon Ball Z* games. Everything
+specific to one game lives in `games/<game>/`: `game.toml` (code discovery),
+`game.h` (what the runtime needs: IRQ dispatcher, save magic, ROM identity,
+N64 title) and the game's own C sources. `GAME=` (default `log2`) selects the
+game for the build scripts and the N64 Makefile; `tools/recomp.py` takes
+`--game`.
+
+| `GAME` | Game | Dump (SHA-1) | Status |
+|---|---|---|---|
+| `log2` | The Legacy of Goku II (USA, `ALFE`) | `18e0715dec419f3501c301511530d2edcd590f8b` | complete |
+| `buu` | Buu's Fury (USA, `BG3E`) | `f1c4b07554d2a3b1ad2f325307051e775ce68087` | in progress: plays on the host build and on N64 with the CPU renderer, native 240×160 view |
+
+For Buu's Fury use `games/buu/game.toml`, `--game buu` and `GAME=buu` in the
+steps above.
 
 ## How it works
 
