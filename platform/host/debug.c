@@ -11,10 +11,10 @@
  *    whose recompiled code misbehaves; 08000000-08000001 (the reset entry)
  *    interprets the whole game.
  *
- * Callees of an interpreted function must be interpreted too: recompiled
- * code keeps the registers it saves and restores in C locals and does not
- * write them back to cpu.r[], which an interpreted caller would see as
- * clobbered.
+ * Callees of an interpreted function are interpreted too, so a range takes
+ * all the code it reaches out of the test.  (Interpreted code calling
+ * recompiled code is also correct: the interpreter puts back the registers
+ * the recompiled callee preserves, runtime/dispatch.h.)
  */
 #include <stdio.h>
 #include <stdlib.h>

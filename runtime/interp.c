@@ -15,6 +15,7 @@
  */
 #include "interp.h"
 #include "recomp.h"
+#include "dispatch.h"
 #include "io.h"
 
 /* result of executing one instruction */
@@ -781,9 +782,14 @@ static void interp_run(uint32_t start, int jump_mode) {
                 break;
             if (call) {
                 uint32_t link = cpu.r[14];
+                gba_saved_regs_t keep;
+                gba_save_regs(&keep);
                 set_tbit(tgt & 1);
                 gba_call(tgt);
                 if (((cpu.next_pc ^ link) >> 1) == 0) {
+                    /* the registers the callee preserves are only right
+                     * in its recompiled callers' locals (dispatch.h) */
+                    gba_restore_preserved(&keep, tgt);
                     /* resume in the caller's state, as recompiled callers
                      * do: a Thumb 'mov lr, pc' link has bit 0 clear */
                     tgt = seq | th;
@@ -795,8 +801,13 @@ static void interp_run(uint32_t start, int jump_mode) {
                 set_tbit(tgt & 1);
                 return;
             } else {
+                uint32_t link = cpu.r[14];
+                gba_saved_regs_t keep;
+                gba_save_regs(&keep);
                 set_tbit(tgt & 1);
                 fn();
+                if (((cpu.next_pc ^ link) >> 1) == 0)
+                    gba_restore_preserved(&keep, tgt);
             }
             tgt = norm_target(cpu.next_pc);
         }

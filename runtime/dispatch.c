@@ -46,6 +46,43 @@ gba_func_t gba_lookup(uint32_t addr, int thumb) {
     return NULL;
 }
 
+/* ABI summary of the function at target: gba_func_table is sorted by key
+ * (address | Thumb bit), gba_func_mod is parallel to it.  Unknown targets
+ * may change everything. */
+static uint32_t func_mod(uint32_t target) {
+    unsigned lo = 0, hi = gba_func_count;
+    while (lo < hi) {
+        unsigned mid = (lo + hi) / 2;
+        if (gba_func_table[mid].addr < target)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    if (lo < gba_func_count && gba_func_table[lo].addr == target)
+        return gba_func_mod[lo];
+    return 0xFFFFFFFFu;
+}
+
+void gba_save_regs(gba_saved_regs_t *s) {
+    for (int i = 0; i < 15; i++)
+        s->r[i] = cpu.r[i];
+    s->n = cpu.n;
+    s->z = cpu.z;
+    s->c = cpu.c;
+    s->v = cpu.v;
+}
+
+void gba_restore_preserved(const gba_saved_regs_t *s, uint32_t target) {
+    uint32_t mod = func_mod(target);
+    for (int i = 0; i < 15; i++)
+        if (!(mod & (1u << i)))
+            cpu.r[i] = s->r[i];
+    if (!(mod & (1u << 16))) cpu.n = s->n;
+    if (!(mod & (1u << 17))) cpu.z = s->z;
+    if (!(mod & (1u << 18))) cpu.c = s->c;
+    if (!(mod & (1u << 19))) cpu.v = s->v;
+}
+
 /* statistics for coverage work */
 uint32_t gba_miss_log[256];
 unsigned gba_miss_count;
@@ -91,7 +128,12 @@ void gba_run_from(uint32_t target, uint32_t sentinel_lr) {
     for (;;) {
         gba_func_t fn = gba_lookup(t, t & 1);
         if (fn) {
+            uint32_t link = cpu.r[14];
+            gba_saved_regs_t keep;
+            gba_save_regs(&keep);
             fn();
+            if (((cpu.next_pc ^ link) >> 1) == 0)
+                gba_restore_preserved(&keep, t);
         } else {
             note_miss(t);
             gba_interp_jump(t);

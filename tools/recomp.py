@@ -987,6 +987,13 @@ def main():
         for f, _ in sorted(bodies, key=lambda x: (x[0]['addr'], x[0]['thumb'])):
             fh.write('  { %s, %s },\n' % (hx(f['addr'] | (1 if f['thumb'] else 0)), fname(f['addr'], f['thumb'])))
         fh.write('};\nconst unsigned gba_func_count = %d;\n' % len(bodies))
+        # what each function may change (its ABI summary): the interpreter
+        # and the top-level loop put back the rest after recompiled code
+        # returns (runtime/dispatch.h)
+        fh.write('const uint32_t gba_func_mod[] = {\n')
+        for f, _ in sorted(bodies, key=lambda x: (x[0]['addr'], x[0]['thumb'])):
+            fh.write('  0x%05X,\n' % (summ.MOD[(f['addr'], f['thumb'])] & (ALLREGS | FLAGS)))
+        fh.write('};\n')
     print('generated %d functions in %d shards' % (len(bodies), shards))
 
 
