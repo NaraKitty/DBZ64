@@ -24,6 +24,7 @@ Model
 """
 import json
 import os
+import re
 import sys
 from collections import defaultdict
 
@@ -33,6 +34,11 @@ from armdecode import Rom, CodeSpace, COND_AL, CONDS  # noqa: E402
 from recomp_consts import (FLAGS, ALLREGS, LOGICAL, TESTS, COND_FLAGS,  # noqa: E402
                            bit, regs_of, use_def_basic)
 from abi import Summaries  # noqa: E402
+
+
+# assignments to the temporaries a fused compare-and-branch reads
+LAZY_SUB_WRITE = re.compile(r'\b(fa|fb|fr)\s*=(?!=)')
+LAZY_FR_WRITE = re.compile(r'\bfr\s*=(?!=)')
 
 
 def fname(addr, thumb):
@@ -757,6 +763,15 @@ class FuncGen:
             self.e('  n = z = c = v = 0;')
         # registers that are never loaded still need a defined value for
         # sync_out paths that store them (they are in written, so loaded).
+        # The body is emitted in address order: when code below the entry
+        # belongs to the function (a shared tail reached by a branch), jump
+        # to the entry first, unless the entry is an unconditional branch to
+        # the first instruction anyway.
+        first = self.addrs[0] if self.addrs else self.addr
+        if first != self.addr:
+            ei = self.ins[self.addr]
+            if not (self.kind[self.addr] == 'branch' and ei.cond == COND_AL and ei.target == first):
+                self.e('  goto L_%08X;' % self.addr)
         prev_falls = True
         self.lazy = None
         self.kconst = {}
@@ -777,7 +792,7 @@ class FuncGen:
             body = self.emit_ins(i)
             for b in body:
                 self.e('  ' + b)
-            self.update_lazy(i)
+            self.update_lazy(i, body)
             self.kconst_update(i)
             prev_falls = self.falls_through(i)
             prev_addr = a
@@ -818,11 +833,20 @@ class FuncGen:
             return False
         return True
 
-    def update_lazy(self, i):
+    def update_lazy(self, i, body=()):
         k = self.kind[i.addr]
         if k != 'normal':
             self.lazy = None
             return
+        if self.lazy is not None and not getattr(i, 's', False):
+            # the temporaries a fused condition reads ('sub': fa, fb, fr;
+            # 'logic': fr) were reused as scratch, e.g. by the address
+            # temporary of an LDM between 'cmp' and 'bne': later conditions
+            # must read the flags
+            pat = LAZY_SUB_WRITE if self.lazy == 'sub' else LAZY_FR_WRITE
+            if any(pat.search(b) for b in body):
+                self.lazy = None
+                return
         if i.op == 'dp' and i.s:
             if i.cond != COND_AL:
                 self.lazy = None
