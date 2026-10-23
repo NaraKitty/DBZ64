@@ -56,6 +56,8 @@ typedef struct { int from, to; uint16_t keys; } keyspan_t;
 static struct {
     int active;
     int nodraw;          /* skip drawing except on shot frames (fast runs) */
+    int frameskip;       /* use the real-time frame skip (off in test runs by default) */
+    int slow_us;         /* burn this much CPU per frame (imitates slower hardware) */
     int profile_from;    /* start the sampling profiler at this frame */
     int frames;
     int shots[64], nshots;
@@ -95,6 +97,10 @@ static void load_test_script(void) {
             test.frames = a;
         } else if (!strncmp(line, "nodraw", 6)) {
             test.nodraw = 1;
+        } else if (!strncmp(line, "frameskip", 9)) {
+            test.frameskip = 1;
+        } else if (sscanf(line, "slow %d", &a) == 1) {
+            test.slow_us = a;
         } else if (sscanf(line, "profile %d", &a) == 1) {
             test.profile_from = a;
         } else if (sscanf(line, "shot %d", &a) == 1) {
@@ -263,34 +269,47 @@ void plat_save_block(uint32_t block) {
 
 /* ------------------------------------------------------------ overlay */
 
-static char overlay_text[64];
+static char overlay_text[2][64];
 static uint64_t ov_t0, ov_game, ov_draw;
-static int ov_frames;
+static int ov_frames, ov_drawn;
+static uint32_t ov_misses;
 
-static void overlay_account(uint64_t game, uint64_t draw) {
+/* line 1: game speed (guest frames per second) and frames actually drawn;
+ * line 2: average CPU time of the game and of a drawn frame, ROM cache
+ * misses (each one stalls on a cartridge read) in the last 30 frames and
+ * since boot */
+static void overlay_account(uint64_t game, uint64_t draw, int drawn) {
     ov_game += game;
     ov_draw += draw;
+    ov_drawn += drawn;
     if (++ov_frames == 30) {
         uint64_t now = get_ticks();
         double secs = (double)TICKS_TO_US(now - ov_t0) / 1e6;
-        snprintf(overlay_text, sizeof overlay_text, "%4.1f fps  game %4.1f ms  draw %4.1f ms",
-                 ov_t0 ? 30.0 / secs : 0.0, (double)TICKS_TO_US(ov_game) / 30000.0,
-                 (double)TICKS_TO_US(ov_draw) / 30000.0);
+        uint32_t m = rom_cache_stats.misses;
+        snprintf(overlay_text[0], sizeof overlay_text[0], "%4.1f fps  %4.1f drawn",
+                 ov_t0 ? 30.0 / secs : 0.0, ov_t0 ? ov_drawn / secs : 0.0);
+        snprintf(overlay_text[1], sizeof overlay_text[1], "game %4.1f draw %4.1f ms  rom %lu/%lu",
+                 (double)TICKS_TO_US(ov_game) / 30000.0,
+                 ov_drawn ? (double)TICKS_TO_US(ov_draw) / 1000.0 / ov_drawn : 0.0,
+                 (unsigned long)(m - ov_misses), (unsigned long)m);
+        ov_misses = m;
         ov_t0 = now;
         ov_game = ov_draw = 0;
-        ov_frames = 0;
+        ov_frames = ov_drawn = 0;
     }
 }
 
 /* CPU text over a finished frame (the RDP must be done with it) */
 static void overlay_draw(surface_t *disp) {
-    graphics_draw_box(disp, 0, 0, 320, 12, graphics_make_color(0, 0, 0, 255));
+    graphics_draw_box(disp, 0, 0, 320, 22, graphics_make_color(0, 0, 0, 255));
     graphics_set_color(graphics_make_color(255, 255, 0, 255), 0);
-    graphics_draw_text(disp, 4, 2, overlay_text);
+    graphics_draw_text(disp, 4, 2, overlay_text[0]);
+    graphics_draw_text(disp, 4, 12, overlay_text[1]);
 }
 
 /* ------------------------------------------------------------ video */
 
+#ifndef USE_RDP
 static uint16_t gba_fb[240 * 160];
 
 static void draw_frame_cpu(surface_t *disp) {
@@ -309,17 +328,38 @@ static void draw_frame_cpu(surface_t *disp) {
         }
     }
 }
+#endif
 
 #ifdef USE_RDP
+#include <stddef.h>
 #include "gba_render.h"
+#include "widescreen.h"
+
+_Static_assert(sizeof(gba_view_t) == sizeof(ws_view_t) &&
+               offsetof(gba_view_t, bg_entry) == offsetof(ws_view_t, bg_entry) &&
+               offsetof(gba_view_t, obj_pos) == offsetof(ws_view_t, obj_pos),
+               "ws_view_t must have the layout of gba_view_t");
+
+/* The 320x240 field view (docs/WIDESCREEN.md), asked for every frame even
+ * when nothing is drawn: asking is what widens the game's culling. */
+static gba_view_t frame_view;
+
+static void get_frame_view(void) {
+    static uint32_t map_gen;
+    ws_get_view((ws_view_t *)&frame_view);
+    if (ws_map_generation() != map_gen) {
+        /* margin tiles cached from the previous map are stale */
+        map_gen = ws_map_generation();
+        for (int bg = 0; bg < 4; bg++)
+            gba_render_invalidate_bg(bg);
+    }
+}
 
 /* RDP renderer: enqueue the frame; the RDP finishes it while the game runs
  * the next frame.  Returns after the frame is queued for display. */
 static void draw_frame_rdp(surface_t *disp, int dump) {
-    gba_view_t view;
-    gba_render_view_native(&view);
     rdpq_attach(disp, NULL);
-    gba_render_frame(disp, &view);
+    gba_render_frame(disp, &frame_view);
     if (dump || overlay) {
         rdpq_detach_wait();
         if (overlay)
@@ -341,8 +381,44 @@ static uint64_t t_last;
  * framebuffer (vsync), and drawing */
 static uint64_t t_frame_end, acc_game, acc_wait, acc_draw;
 
+/* Real-time frame skip.  Guest time advances one GBA frame per plat_frame,
+ * so a frame that misses its vsync would slow the game down and starve the
+ * audio.  When the game is more than half a frame behind real time, the
+ * frame is not drawn (the VI keeps showing the previous one) so the game
+ * catches up; at most MAX_SKIP frames in a row are skipped. */
+#define FRAME_TICKS ((uint64_t)TICKS_PER_SECOND / 60)
+#define MAX_SKIP 2
+static uint64_t deadline;      /* real time at which this frame is due */
+static int skip_run;
+static uint32_t stat_skipped;
+
+__attribute__((unused)) static int frame_should_skip(uint64_t now) {
+    deadline = deadline ? deadline + FRAME_TICKS : now;
+    int64_t late = (int64_t)(now - deadline);
+    if (late > (int64_t)(4 * FRAME_TICKS)) {
+        /* a long stall (loading): don't try to catch up with it */
+        deadline = now;
+        late = 0;
+    }
+    if (late > (int64_t)(FRAME_TICKS / 2) && skip_run < MAX_SKIP) {
+        skip_run++;
+        return 1;
+    }
+    skip_run = 0;
+    return 0;
+}
+
+/* display_get() had to wait for a free buffer: the game is ahead of the
+ * display, so this vsync is its schedule (keeps the clock from drifting
+ * against the VI rate) */
+__attribute__((unused)) static void frame_synced(uint64_t before, uint64_t after) {
+    if (after - before > TICKS_FROM_US(2000))
+        deadline = after;
+}
+
 void plat_frame(void) {
     uint64_t t0 = get_ticks();
+    prof_watchdog_kick();
     if (t_frame_end)
         acc_game += t0 - t_frame_end;
     frame++;
@@ -354,23 +430,38 @@ void plat_frame(void) {
             if (frame >= test.spans[i].from && frame <= test.spans[i].to)
                 pressed |= test.spans[i].keys;
         keyinput = (uint16_t)(0x3FF & ~pressed);
+        if (test.slow_us)
+            wait_ticks(TICKS_FROM_US(test.slow_us));
     }
 
     uint64_t t1 = get_ticks();
-    surface_t *disp = display_get();
-    uint64_t t2 = get_ticks();
     int shot_now = 0;
     for (int i = 0; i < test.nshots; i++)
         if (test.shots[i] == frame)
             shot_now = 1;
 #ifdef USE_RDP
-    if (!test.nodraw || shot_now) {
-        draw_frame_rdp(disp, test.active && shot_now);
-    } else {
+    get_frame_view();
+    int drawn = 0;
+    uint64_t t2 = t1;
+    if (test.nodraw && !shot_now) {
+        /* fast test runs: nothing drawn, still paced by the display */
+        surface_t *disp = display_get();
+        t2 = get_ticks();
         display_show(disp);
+    } else if ((test.active && !test.frameskip) || shot_now || !frame_should_skip(t1)) {
+        surface_t *disp = display_get();
+        t2 = get_ticks();
+        frame_synced(t1, t2);
+        draw_frame_rdp(disp, test.active && shot_now);
+        drawn = 1;
+    } else {
+        stat_skipped++;   /* the VI keeps showing the previous frame */
     }
     uint64_t t3 = get_ticks();
 #else
+    int drawn = 1;
+    surface_t *disp = display_get();
+    uint64_t t2 = get_ticks();
     if (!test.nodraw || shot_now)
         draw_frame_cpu(disp);
     uint64_t t3 = get_ticks();
@@ -380,7 +471,7 @@ void plat_frame(void) {
         fb_dump(frame, disp);
     display_show(disp);
 #endif
-    overlay_account(t_frame_end ? t0 - t_frame_end : 0, t3 - t2);
+    overlay_account(t_frame_end ? t0 - t_frame_end : 0, t3 - t2, drawn);
     acc_wait += t2 - t1;
     acc_draw += t3 - t2;
 
@@ -393,13 +484,23 @@ void plat_frame(void) {
                (double)TICKS_TO_US(now - t_last) / 120000.0, (double)TICKS_TO_US(acc_game) / 120000.0,
                (double)TICKS_TO_US(acc_wait) / 120000.0, (double)TICKS_TO_US(acc_draw) / 120000.0,
                (unsigned long)rom_cache_stats.misses);
-        debugf("f%d: audio blocks %lu dropped %lu queued %d\n", frame,
-               (unsigned long)stat_audio_blocks, (unsigned long)stat_audio_drops, (int)(a_wr - a_rd));
+        debugf("f%d: audio blocks %lu dropped %lu queued %d; frames skipped %lu\n", frame,
+               (unsigned long)stat_audio_blocks, (unsigned long)stat_audio_drops, (int)(a_wr - a_rd),
+               (unsigned long)stat_skipped);
         stat_audio_blocks = stat_audio_drops = 0;
+        stat_skipped = 0;
         debugf("f%d: tlb refills %lu emulated %lu (last va %08lX pc %08lX) vram marks %lu\n", frame,
                (unsigned long)tlb_stats.rom_refills, (unsigned long)tlb_stats.emulated,
                (unsigned long)tlb_stats.last_va, (unsigned long)tlb_stats.last_epc,
                (unsigned long)tlb_stats.vram_marks);
+#ifdef USE_RDP
+        const gba_render_stats_t *rs = gba_render_get_stats();
+        debugf("f%d: render us total %lu wait %lu track %lu bg %lu obj %lu raster %lu; "
+               "rects %lu obj %lu field %d\n", frame,
+               (unsigned long)rs->us_total, (unsigned long)rs->us_wait, (unsigned long)rs->us_track,
+               (unsigned long)rs->us_bg, (unsigned long)rs->us_obj, (unsigned long)rs->us_raster,
+               (unsigned long)rs->rects, (unsigned long)rs->obj_drawn, ws_field_view_active());
+#endif
         acc_game = acc_wait = acc_draw = 0;
         t_last = now;
     }
@@ -490,8 +591,12 @@ int main(void) {
     sram_init();
     debugf("DBZ LoG2 N64: memory %d bytes, audio %d Hz\n", get_memory_size(), audio_get_frequency());
     load_test_script();
+    if (test.active)
+        prof_watchdog_start();
     load_save();
     rom_cache_init(ROM_CACHE_BYTES);
+    rom_cache_preload();
+    debugf("rom cache: %lu pages preloaded\n", (unsigned long)rom_cache_stats.preloaded);
 #ifdef GBA_TLB
     tlb_init();
     const char *bad = tlb_selftest();
@@ -506,5 +611,8 @@ int main(void) {
 #endif
     t_last = get_ticks();
     uint8_t *stack = memalign(16, GAME_STACK);
+    heap_stats_t hs;
+    sys_get_heap_stats(&hs);
+    debugf("heap: %d of %d bytes used, %d free\n", hs.used, hs.total, hs.total - hs.used);
     run_game_on_stack(stack + GAME_STACK);
 }
