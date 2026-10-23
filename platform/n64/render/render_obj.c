@@ -737,13 +737,6 @@ void obj_cpu_draw(int code, int fx) {
     r_blit_image(buf, pitch, FMT_CI8, hole_x0, hole_y0, w, h);
 }
 
-static void draw_one(const objinfo_t *o, int x, int y) {
-    if (o->affine && !o->ident)
-        draw_affine(o, x, y);
-    else
-        draw_regular(o, x, y);
-}
-
 void obj_draw(int i, int fx) {
     const objinfo_t *o = &info[i];
     r_bind(PAL_OBJ, fx);
@@ -753,21 +746,29 @@ void obj_draw(int i, int fx) {
     for (int a = 0; a < ny; a++)
         for (int b = 0; b < nx; b++) {
             int x = xs[b], y = ys[a];
+            /* the clip windows: the region, or around the CPU-composited
+             * rectangle (above, below, left, right) */
+            int rc[4][4], nrc = 0;
             if (!hole_on || x >= hole_x1 || x + o->bw <= hole_x0 || y >= hole_y1 || y + o->bh <= hole_y0) {
-                r_scissor_region();
-                draw_one(o, x, y);
-                continue;
+                rc[0][0] = R.gx0; rc[0][1] = R.gy0; rc[0][2] = R.gx1; rc[0][3] = R.gy1;
+                nrc = 1;
+            } else {
+                const int cand[4][4] = { { R.gx0, R.gy0, R.gx1, hole_y0 }, { R.gx0, hole_y1, R.gx1, R.gy1 },
+                                         { R.gx0, hole_y0, hole_x0, hole_y1 }, { hole_x1, hole_y0, R.gx1, hole_y1 } };
+                for (int k = 0; k < 4; k++) {
+                    const int *c = cand[k];
+                    if (c[0] >= c[2] || c[1] >= c[3] || x >= c[2] || x + o->bw <= c[0] ||
+                        y >= c[3] || y + o->bh <= c[1])
+                        continue;
+                    memcpy(rc[nrc++], c, sizeof rc[0]);
+                }
             }
-            /* around the CPU-composited rectangle: above, below, left, right */
-            int rc[4][4] = { { R.gx0, R.gy0, R.gx1, hole_y0 }, { R.gx0, hole_y1, R.gx1, R.gy1 },
-                             { R.gx0, hole_y0, hole_x0, hole_y1 }, { hole_x1, hole_y0, R.gx1, hole_y1 } };
-            for (int k = 0; k < 4; k++) {
-                const int *c = rc[k];
-                if (c[0] >= c[2] || c[1] >= c[3] || x >= c[2] || x + o->bw <= c[0] ||
-                    y >= c[3] || y + o->bh <= c[1])
-                    continue;
-                r_scissor(c[0], c[1], c[2], c[3]);
-                draw_one(o, x, y);
+            for (int k = 0; k < nrc; k++) {
+                r_scissor(rc[k][0], rc[k][1], rc[k][2], rc[k][3]);
+                if (o->affine && !o->ident)
+                    draw_affine(o, x, y);
+                else
+                    draw_regular(o, x, y);
             }
         }
 }

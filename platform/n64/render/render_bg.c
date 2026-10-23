@@ -638,8 +638,8 @@ static void text_row(int n, int line, int y, uint8_t *dst, int w) {
 }
 
 /* a text BG with mosaic, rasterised on the CPU (mosaic is rare: screen
- * transitions) */
-static void bg_draw_text_mosaic(int n, int fx, int mh, int mv) {
+ * transitions; kept out of line, away from the cached path) */
+static __attribute__((noinline)) void bg_draw_text_mosaic(int n, int fx, int mh, int mv) {
     uint64_t t0 = get_ticks();
     int w = R.gx1 - R.gx0, h = R.gy1 - R.gy0, pitch = (w + 7) & ~7;
     if (w <= 0 || w > 320 || h <= 0)
