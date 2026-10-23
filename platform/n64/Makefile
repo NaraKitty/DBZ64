@@ -82,6 +82,9 @@ GAME_ROM_TITLE := $(shell sed -n 's/.*define GAME_N64_ROM_TITLE *\("[^"]*"\).*/\
 
 dbz.z64: N64_ROM_TITLE = $(GAME_ROM_TITLE)
 dbz.z64: N64_ROM_SAVETYPE = sram256k
+# USA (NTSC): flash carts set the console's TV mode from this; with no region
+# they may start it in PAL (50 Hz) timing
+dbz.z64: N64_ROM_REGION = E
 dbz.z64: N64_ROM_EXPANSIONPAK = required
 dbz.z64: $(BUILD_DIR)/dbz.dfs
 

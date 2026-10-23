@@ -383,39 +383,43 @@ static uint64_t t_last;
  * framebuffer (vsync), and drawing */
 static uint64_t t_frame_end, acc_game, acc_wait, acc_draw;
 
-/* Real-time frame skip.  Guest time advances one GBA frame per plat_frame,
- * so a frame that misses its vsync would slow the game down and starve the
- * audio.  When the game is more than half a frame behind real time, the
- * frame is not drawn (the VI keeps showing the previous one) so the game
- * catches up; at most MAX_SKIP frames in a row are skipped. */
-#define FRAME_TICKS ((uint64_t)TICKS_PER_SECOND / 60)
+/* Game pacing.  Guest time advances one GBA frame per plat_frame and each
+ * GBA frame produces 280896 / 1050 = 267.52 audio samples, so the game must
+ * run at audio_frequency / 267.52 frames per second (59.82 at the AI's
+ * 16004 Hz) or the audio runs dry or piles up.  Drawing waits for the
+ * display, which is about that rate on a 60 Hz console but 50 Hz on PAL
+ * timing.  The schedule below is kept in real time: when the game is more
+ * than half a frame behind it, the frame is not drawn (the VI keeps showing
+ * the previous one) and the next game frame runs at once; at most MAX_SKIP
+ * frames in a row are skipped.  On a 50 Hz display that is about one game
+ * frame in six; at 60 Hz, only frames that ran long. */
+#define GBA_SAMPLES_PER_FRAME_X100 26752u
 #define MAX_SKIP 2
+static uint64_t frame_ticks;   /* real time per game frame */
 static uint64_t deadline;      /* real time at which this frame is due */
 static int skip_run;
 static uint32_t stat_skipped;
 
 __attribute__((unused)) static int frame_should_skip(uint64_t now) {
-    deadline = deadline ? deadline + FRAME_TICKS : now;
+    if (!frame_ticks)
+        frame_ticks = (uint64_t)TICKS_PER_SECOND * GBA_SAMPLES_PER_FRAME_X100 /
+                      (100u * (uint64_t)audio_get_frequency());
+    deadline = deadline ? deadline + frame_ticks : now;
     int64_t late = (int64_t)(now - deadline);
-    if (late > (int64_t)(4 * FRAME_TICKS)) {
+    if (late > (int64_t)(4 * frame_ticks)) {
         /* a long stall (loading): don't try to catch up with it */
         deadline = now;
         late = 0;
+    } else if (late < -(int64_t)frame_ticks) {
+        /* the display runs faster than the game: bank at most one frame */
+        deadline = now + frame_ticks;
     }
-    if (late > (int64_t)(FRAME_TICKS / 2) && skip_run < MAX_SKIP) {
+    if (late > (int64_t)(frame_ticks / 2) && skip_run < MAX_SKIP) {
         skip_run++;
         return 1;
     }
     skip_run = 0;
     return 0;
-}
-
-/* display_get() had to wait for a free buffer: the game is ahead of the
- * display, so this vsync is its schedule (keeps the clock from drifting
- * against the VI rate) */
-__attribute__((unused)) static void frame_synced(uint64_t before, uint64_t after) {
-    if (after - before > TICKS_FROM_US(2000))
-        deadline = after;
 }
 
 void plat_frame(void) {
@@ -453,7 +457,6 @@ void plat_frame(void) {
     } else if ((test.active && !test.frameskip) || shot_now || !frame_should_skip(t1)) {
         surface_t *disp = display_get();
         t2 = get_ticks();
-        frame_synced(t1, t2);
         draw_frame_rdp(disp, test.active && shot_now);
         drawn = 1;
     } else {
