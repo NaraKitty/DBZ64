@@ -1,8 +1,9 @@
 /*
  * bios.c - native BIOS services and CPU mode handling.
  *
- * The game only calls SWI 0 (SoftReset), 2 (Halt), 3 (Stop) and 6 (Div);
- * newlib's dead semihosting stubs (Thumb 0xAB, ARM 0x123456) are ignored.
+ * The games call SWI 0 (SoftReset), 2 (Halt), 3 (Stop), 6 (Div) and, in
+ * Buu's Fury's link-cable and wireless libraries, 0x0B (CpuSet); newlib's dead
+ * semihosting stubs (Thumb 0xAB, ARM 0x123456) are ignored.
  */
 #include <stdio.h>
 #include <stdarg.h>
@@ -165,6 +166,43 @@ static void swi_div(void) {
     cpu.r[3] = (uint32_t)(q < 0 ? -q : q);
 }
 
+/* CpuSet (0x0B) / CpuFastSet (0x0C): r0 source, r1 destination, r2 = count
+ * (bits 0-20) | fill (bit 24) | 32-bit units (bit 26; always for FastSet,
+ * whose count rounds up to 8 words).  Like the BIOS, a source below EWRAM is
+ * refused and the addresses are forced to the unit alignment. */
+static void swi_cpuset(int fast) {
+    uint32_t src = cpu.r[0], dst = cpu.r[1], ctl = cpu.r[2];
+    uint32_t n = ctl & 0x1FFFFFu;
+    int fill = (ctl >> 24) & 1;
+    if ((src >> 24) < 0x02)
+        return;
+    if (fast)
+        n = (n + 7) & ~7u;
+    if (fast || (ctl & (1u << 26))) {
+        src &= ~3u;
+        dst &= ~3u;
+        uint32_t v = rd32(src);
+        for (uint32_t i = 0; i < n; i++) {
+            wr32(dst, fill ? v : rd32(src));
+            dst += 4;
+            if (!fill)
+                src += 4;
+        }
+    } else {
+        src &= ~1u;
+        dst &= ~1u;
+        uint32_t v = rd16(src);
+        for (uint32_t i = 0; i < n; i++) {
+            wr16(dst, fill ? v : rd16(src));
+            dst += 2;
+            if (!fill)
+                src += 2;
+        }
+    }
+    cpu.r[0] = src;
+    cpu.r[1] = dst;
+}
+
 void gba_swi(uint32_t num, uint32_t ret_addr, int thumb) {
     (void)ret_addr;
     (void)thumb;
@@ -187,6 +225,12 @@ void gba_swi(uint32_t num, uint32_t ret_addr, int thumb) {
         swi_div();
         break;
     }
+    case 0x0B:
+        swi_cpuset(0);
+        break;
+    case 0x0C:
+        swi_cpuset(1);
+        break;
     case 0x12:     /* ARM 'swi 0x123456' semihosting exit (dead code) */
     case 0xAB:     /* Thumb semihosting (dead code) */
         break;
