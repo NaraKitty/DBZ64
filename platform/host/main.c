@@ -6,7 +6,7 @@
  *
  *   dbz --rom baserom.gba [--frames N] [--shot F,F,..] [--every K]
  *       [--out DIR] [--keys "F-F:KEY+KEY;F:KEY"] [--save file] [--wav file]
- *       [--dump-state F,..]
+ *       [--dump-state F,..] [--dump-ram F,..]
  *       [--ws] [--ws-native] [--ws-debug] [--ws-off] [--ws-nodespawn]
  *       [--ws-force-decode] [--ws-decode-test]
  *
@@ -364,6 +364,18 @@ static void dump_state(const char *path) {
     fclose(f);
 }
 
+/* --dump-ram F,F,..: IWRAM (32KB) then EWRAM (256KB) as GBA bytes, at VBlank
+ * of frame F (the layout of the oracle's ram_NNNNN.bin, for RAM diffs) */
+static int ram_dumps[256], nram_dumps;
+
+static void dump_ram(const char *path) {
+    FILE *f = fopen(path, "wb");
+    if (!f) { perror(path); return; }
+    put_mem(f, gba_mem.iwram, GBA_IWRAM_SIZE);
+    put_mem(f, gba_mem.ewram, GBA_EWRAM_SIZE);
+    fclose(f);
+}
+
 static volatile int frames_since_alarm;
 static time_t t_start;
 
@@ -405,6 +417,12 @@ void plat_frame(void) {
             snprintf(path, sizeof path, "%s/state_%05d.bin", outdir, frame);
             dump_state(path);
             want = 1;
+        }
+    for (int i = 0; i < nram_dumps; i++)
+        if (ram_dumps[i] == frame) {
+            char path[512];
+            snprintf(path, sizeof path, "%s/ram_%05d.bin", outdir, frame);
+            dump_ram(path);
         }
     if (ws_decode_test) {
         ws_run_decode_test();
@@ -499,6 +517,13 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--ws-nodespawn")) { ws_widen_despawn = 0; }
         else if (!strcmp(a, "--ws-decode-test")) { ws_decode_test = 1; }
         else if (!strcmp(a, "--ws-force-decode")) { ws_debug_flags |= WS_DBG_FORCE_DECODE; }
+        else if (!strcmp(a, "--dump-ram")) {
+            char *dup = strdup(v), *sv = NULL;
+            for (char *t = strtok_r(dup, ",", &sv); t && nram_dumps < 256; t = strtok_r(NULL, ",", &sv))
+                ram_dumps[nram_dumps++] = atoi(t);
+            free(dup);
+            i++;
+        }
         else if (!strcmp(a, "--dump-state")) {
             char *dup = strdup(v), *sv = NULL;
             for (char *t = strtok_r(dup, ",", &sv); t && ndumps < 256; t = strtok_r(NULL, ",", &sv))

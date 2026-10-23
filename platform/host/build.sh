@@ -1,9 +1,11 @@
 #!/bin/bash
 # Build the host test harness in WSL.
-#   [GAME=log2|buu] bash platform/host/build.sh [gen_dir] [out_dir]
+#   [GAME=log2|buu] [DEBUG=1] bash platform/host/build.sh [gen_dir] [out_dir]
 # The game's directory (games/$GAME: game.h and its C sources) is compiled in.
 # Default gen/out dirs: LoG2 /mnt/d/dbz-n64/{gen/c,build/host}, other games
 # /mnt/d/dbz-n64/$GAME/{gen/c,build/host}.
+# DEBUG=1 builds the debug harness (platform/host/debug.c) for generated code
+# made with tools/recomp.py --trace.
 set -e
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 GAME="${GAME:-log2}"
@@ -22,11 +24,16 @@ INC="-I$REPO/runtime -I$GAMEDIR -I$GEN"
 SRCS="$REPO/runtime/mem.c $REPO/runtime/io.c $REPO/runtime/bios.c $REPO/runtime/dispatch.c \
       $REPO/runtime/runtime.c $REPO/runtime/interp.c $REPO/runtime/native.c $REPO/runtime/ppu_soft.c \
       $GAMEDIR/*.c $REPO/platform/host/main.c"
+if [ -n "$DEBUG" ]; then
+    CFLAGS="$CFLAGS -DRECOMP_TRACE"
+    SRCS="$SRCS $REPO/platform/host/debug.c"
+fi
 OBJS=""
-# objects of one game must not be reused for another
-if [ "$(cat "$OUT/obj/game.txt" 2>/dev/null)" != "$GAME" ]; then
+# objects of one game (or of the debug build) must not be reused for another
+KIND="$GAME${DEBUG:+ debug}"
+if [ "$(cat "$OUT/obj/game.txt" 2>/dev/null)" != "$KIND" ]; then
     FORCE=1
-    echo "$GAME" > "$OUT/obj/game.txt"
+    echo "$KIND" > "$OUT/obj/game.txt"
 fi
 compile() {
     local src="$1" obj="$2"
@@ -46,4 +53,4 @@ for s in "$GEN"/gen_*.c; do
 done
 wait
 gcc $CFLAGS -o "$OUT/dbz" $OBJS
-echo "built $OUT/dbz ($GAME)"
+echo "built $OUT/dbz ($KIND)"

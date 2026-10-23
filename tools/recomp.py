@@ -51,6 +51,11 @@ def hx(v):
 
 # ------------------------------------------------------------ hooks
 
+# --trace: every function starts with 'if (TRACE_ENTER(addr)) return;' (a
+# no-op unless built with -DRECOMP_TRACE and a gba_trace_enter(), which can
+# log entries or hand functions to the interpreter; runtime/recomp.h)
+TRACE = '--trace' in sys.argv
+
 # pc -> C function name; filled from game.toml
 OVERRIDE_LOAD = {}      # value loaded at pc is passed through func(value)
 HOOK_BEFORE = {}        # func(const uint32_t regs[15]) runs before pc
@@ -751,6 +756,8 @@ class FuncGen:
         self.e('  uint32_t r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14;')
         self.e('  uint32_t n, z, c, v, fa, fb, fr, ft, ft2, t;')
         self.e('  const uint32_t ret = cpu.r[14];')
+        if TRACE:
+            self.e('  if (TRACE_ENTER(%s)) return;' % hx(self.addr | self.T))
         if getattr(self, 'warn_entry', False):
             self.e('  gba_unexpected(%s);' % hx(self.addr | self.T))
         entry_live = self.live[self.addr]
@@ -877,7 +884,7 @@ def game_toml(argv):
 
 
 def main():
-    """recomp.py ROM functions.json OUTDIR [SHARDS] [--game NAME | --config TOML] [--dump-abi]"""
+    """recomp.py ROM functions.json OUTDIR [SHARDS] [--game NAME | --config TOML] [--dump-abi] [--trace]"""
     args, k = [], 1
     while k < len(sys.argv):
         if sys.argv[k] in ('--game', '--config'):

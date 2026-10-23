@@ -137,6 +137,28 @@ IRQ handler's DMA register writes, which use a register-relative address.
 - Frames are compared against the software reference renderer, and that
   renderer was fuzzed against an independent model.
 
+## Debugging recompiled code (host)
+
+Guest time only advances in Halt, so the host build, the N64 build and the
+interpreter all see exactly the same game state at every VBlank. That makes
+the interpreter (`runtime/interp.c`) a reference for the recompiled code:
+
+1. Generate a traced copy of the code: `tools/recomp.py ... OUTDIR --game G
+   --trace`. Every function then starts with `if (TRACE_ENTER(addr)) return;`.
+2. Build it with `DEBUG=1 GAME=G platform/host/build.sh OUTDIR BUILD`, which
+   adds `platform/host/debug.c`: it keeps the last 4096 function entries and
+   prints them when the run dies.
+3. `GBA_INTERP_FN=lo-hi[,lo-hi...]` runs the functions entered in those
+   ranges, and everything they call, in the interpreter.
+   `08000000-08000001` (the reset entry) interprets the whole game. If a
+   failure disappears when a range is interpreted, bisect the range down to
+   the function whose recompiled code misbehaves.
+4. `--dump-ram F,F,..` writes IWRAM and EWRAM at those VBlanks
+   (`ram_NNNNN.bin`, the mGBA oracle's layout). Compare a recompiled and an
+   interpreted run, or the oracle. Only the dead stack area may differ:
+   recompiled code does not keep dead registers' values, which functions
+   still push.
+
 ## N64 platform (`platform/n64/`)
 
 **Video:**
