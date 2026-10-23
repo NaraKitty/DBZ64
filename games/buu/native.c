@@ -530,3 +530,249 @@ void native_memset16(void) {
     cpu.r[0] = d + 2 * nh;
     cpu.r[2] = fa - 2;
 }
+
+/* ------------------------------------------------------------ LZ decoder */
+
+/* ARM shifts by a register: the bottom byte counts, 32 and more give 0 */
+static inline uint32_t arm_lsl(uint32_t v, uint32_t n) {
+    n &= 0xFFu;
+    return n >= 32 ? 0 : v << n;
+}
+static inline uint32_t arm_lsr(uint32_t v, uint32_t n) {
+    n &= 0xFFu;
+    return n >= 32 ? 0 : v >> n;
+}
+
+/* 0x03000040 (ARM, IWRAM): the engine's bit-stream LZ decoder (LoG2
+ * 0x03000000; the game's resource, map chunk and sprite decompression).
+ * r0 = destination (bytes, advanced), r1 = source (words, advanced), r3 =
+ * the literal width in bits, r4 = the literal base (until a code changes
+ * it).  The bits come MSB first from 32-bit words: r6 holds them, sl counts
+ * those left.  Codes:
+ *   1                literal: r3 bits + r4
+ *   01 gamma ...     match: gamma 2 = the last offset again, else offset =
+ *                    (gamma - 3) << r5 | r5 bits; then a gamma length,
+ *                    longer for far offsets
+ *   001 x(7)         x != 0: offset x, length 2 bits + 2; x = 0: 2 bits y,
+ *                    y = 0 ends, else r5 = (y + 3 bits)
+ *   000 n(4)         n = 1: a 0 byte; n >= 2: the byte n - 1 back; n = 0:
+ *                    1 -> 256 bytes of 8 bits (repeated while 1 follows),
+ *                    0 then 0 -> r4 = 8 bits, r3 = 7, 0 then 1 -> r3 = 8
+ * The routine is transcribed with its registers; the bit reader at
+ * 0x0300028C is inlined (its flags are never read).  Exit as the
+ * recompiled routine leaves it: r0, r1, r12 (last offset) from the
+ * decoder, r4-r11 and lr popped (pushed: r4, 0, r6, 0, 0, r9, 0, 0, lr;
+ * r5, r7, r8, r10, r11 are not inputs), flags of the final 'cmp r7, #0'. */
+void native_lz_decode(void) {
+    uint32_t r0 = cpu.r[0], r1 = cpu.r[1], r3 = cpu.r[3], r4 = cpu.r[4], r6 = cpu.r[6];
+    uint32_t sp = cpu.r[13];
+    sp_wr32(sp - 36, r4);
+    sp_wr32(sp - 32, 0);
+    sp_wr32(sp - 28, r6);
+    sp_wr32(sp - 24, 0);
+    sp_wr32(sp - 20, 0);
+    sp_wr32(sp - 16, cpu.r[9]);
+    sp_wr32(sp - 12, 0);
+    sp_wr32(sp - 8, 0);
+    sp_wr32(sp - 4, cpu.r[14]);
+    uint32_t r5 = 8, sl = 0, ip = 1, r7, r8, sb, fp, c;
+/* one bit into c: subs sl, #1; ldrmi r6, [r1], #4; movmi sl, #31; adds r6, r6, r6 */
+#define BIT() do {                                      \
+        sl--;                                           \
+        if ((int32_t)sl < 0) {                          \
+            r6 = rd32(r1);                              \
+            r1 += 4;                                    \
+            sl = 31;                                    \
+        }                                               \
+        c = r6 >> 31;                                   \
+        r6 += r6;                                       \
+    } while (0)
+/* r7 = the next n bits (0x0300028C) */
+#define BITS(n) do {                                    \
+        r8 = (n);                                       \
+        if (sl == 0) {                                  \
+            r6 = rd32(r1);                              \
+            r1 += 4;                                    \
+            sl = 32;                                    \
+        }                                               \
+        fp = r8 > sl ? sl : r8;                         \
+        r7 = arm_lsr(r6, 32 - fp);                      \
+        r6 = arm_lsl(r6, fp);                           \
+        sl -= fp;                                       \
+        r8 -= fp;                                       \
+        if (r8) {                                       \
+            r6 = rd32(r1);                              \
+            r1 += 4;                                    \
+            sl = 32 - r8;                               \
+            fp = arm_lsr(r6, sl);                       \
+            r7 = fp + arm_lsl(r7, r8);                  \
+            r6 = arm_lsl(r6, r8);                       \
+        }                                               \
+    } while (0)
+/* sb = 1, then 'BIT; sb = 2 * sb + c; BIT' while that second bit is 1 */
+#define GAMMA() do {                                    \
+        sb = 1;                                         \
+        do {                                            \
+            BIT();                                      \
+            sb = sb + sb + c;                           \
+            BIT();                                      \
+        } while (c);                                    \
+    } while (0)
+    (void)fp;
+    goto next;
+literal:                                    /* 0x03000054 */
+    BITS(r3);
+    r7 += r4;
+store:                                      /* 0x03000060 */
+    wr8(r0, r7);
+    r0++;
+next:                                       /* 0x03000064 */
+    BIT();
+    if (c)
+        goto literal;
+    BIT();
+    if (c)
+        goto match;
+    BIT();
+    if (!c)
+        goto short_match;
+    BITS(4);                                /* 0x030000A0 */
+    r7 -= 1;
+    if (r7 == 0)
+        goto store;
+    if ((int32_t)r7 >= 0) {                 /* 0x03000128: a byte r7 back */
+        r7 = rd8(r0 - r7);
+        goto store;
+    }
+    BIT();                                  /* 0x030000B4 */
+    if (!c)
+        goto set_literal;
+    do {                                    /* 0x030000C8: runs of 256 raw bytes */
+        sb = 0x100;
+        do {
+            BITS(8);
+            wr8(r0, r7);
+            r0++;
+        } while (--sb);
+        BIT();
+    } while (c);
+    goto next;
+set_literal:                                /* 0x030000F8 */
+    r4 = 0;
+    BIT();
+    r3 = 7 + c;
+    if (r3 == 8)
+        goto next;
+    BITS(8);
+    r4 = r7;
+    goto next;
+short_match:                                /* 0x03000130 */
+    BITS(7);
+    if (r7 == 0) {
+        BITS(2);                            /* 0x0300015C */
+        if (r7 == 0)
+            goto done;
+        BITS(r7 + 3);
+        r5 = r7;
+        goto next;
+    }
+    ip = r7;
+    BITS(2);
+    sb = r7 + 2;
+    goto copy;
+match:                                      /* 0x0300017C */
+    GAMMA();
+    if (sb == 2) {                          /* the last offset again */
+        GAMMA();
+        goto copy;
+    }
+    sb -= 3;                                /* 0x030001E8 */
+    BITS(r5);
+    ip = r7 + arm_lsl(sb, r5);
+    GAMMA();
+    if (ip >= 0x10000u)
+        sb += 3;
+    else if (ip >= 0x37FFu)
+        sb += 2;
+    else if (ip >= 0x27Fu)
+        sb += 1;
+    else if (ip <= 0x7Fu)
+        sb += 4;
+copy:                                       /* 0x03000264 / 0x03000278 */
+    do {
+        r8 = rd8(r0 - ip);
+        wr8(r0, r8);
+        r0++;
+    } while (--sb);
+    goto next;
+done:                                       /* 0x030002D4 */
+#undef BIT
+#undef BITS
+#undef GAMMA
+    cpu.r[0] = r0;
+    cpu.r[1] = r1;
+    cpu.r[3] = r3;
+    cpu.r[4] = sp_rd32(sp - 36);
+    cpu.r[5] = sp_rd32(sp - 32);
+    cpu.r[6] = sp_rd32(sp - 28);
+    cpu.r[7] = sp_rd32(sp - 24);
+    cpu.r[8] = sp_rd32(sp - 20);
+    cpu.r[9] = sp_rd32(sp - 16);
+    cpu.r[10] = sp_rd32(sp - 12);
+    cpu.r[11] = sp_rd32(sp - 8);
+    cpu.r[12] = ip;
+    cpu.r[14] = sp_rd32(sp - 4);
+    cpu.n = 0;
+    cpu.z = 1;
+    cpu.c = 1;
+    cpu.v = 0;
+}
+
+/* 0x03000388 (ARM, IWRAM): a linear 8bpp bitmap {+0x24 base, +0x28 width
+ * = stride, +0x2C height} to 8x8 tiles at r1 (64 bytes each, advanced),
+ * band by band, each tile as 4 groups of two 8-byte rows (ldm, ldm, stm).
+ * Exit as the recompiled routine leaves it: r1 advanced, r2 = base +
+ * height * stride, r3 = stride, r4-r11 popped (pushed as 0: not inputs),
+ * flags of the last 'subs r4, #8'. */
+void native_bitmap_tiles(void) {
+    uint32_t bm = cpu.r[0], r1 = cpu.r[1], sp = cpu.r[13];
+    uint32_t base = rd32(bm + 0x24), stride = rd32(bm + 0x28), height = rd32(bm + 0x2C);
+    for (int i = 0; i < 8; i++)
+        sp_wr32(sp - 32 + 4 * (uint32_t)i, 0);
+    /* the loops run while 'subs #8' leaves non-zero: counts 0 or not a
+     * multiple of 8 never end in the original either */
+    uint32_t r4 = height, fa = 0;
+    do {
+        uint32_t r5 = stride, r6 = base;
+        do {
+            uint32_t r7 = r6;
+            /* ldm/stm as the recompiled routine does them (rd32/wr32 of
+             * the addresses as they are) */
+            for (int g = 0; g < 4; g++) {
+                uint32_t a = rd32(r7), b = rd32(r7 + 4);
+                r7 += stride;
+                uint32_t c = rd32(r7), d = rd32(r7 + 4);
+                r7 += stride;
+                wr32(r1, a); wr32(r1 + 4, b); wr32(r1 + 8, c); wr32(r1 + 12, d);
+                r1 += 16;
+            }
+            r6 += 8;
+            r5 -= 8;
+        } while (r5);
+        base += stride * 8;
+        fa = r4;
+        r4 -= 8;
+    } while (r4);
+    flags_sub(fa, 8);
+    cpu.r[1] = r1;
+    cpu.r[2] = base;
+    cpu.r[3] = stride;
+    cpu.r[4] = sp_rd32(sp - 32);
+    cpu.r[5] = sp_rd32(sp - 28);
+    cpu.r[6] = sp_rd32(sp - 24);
+    cpu.r[7] = sp_rd32(sp - 20);
+    cpu.r[8] = sp_rd32(sp - 16);
+    cpu.r[9] = sp_rd32(sp - 12);
+    cpu.r[10] = sp_rd32(sp - 8);
+    cpu.r[11] = sp_rd32(sp - 4);
+}
