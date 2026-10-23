@@ -10,9 +10,11 @@
  *
  * Every miss is a stall with interrupts off (PI DMA inside the TLB
  * exception), so the game's hot pages (game.toml [rom] preload, measured on
- * the host) are loaded at boot.  When the cache is full the least recently
- * used page goes: a resident page is stamped whenever it is looked up, which
- * happens on every TLB refill and slow-path read.
+ * the host) are loaded at boot and pinned.  When the cache is full the least
+ * recently used unpinned page goes (pinned ones only if nothing else is
+ * left), so title screens and the attract demo cannot push gameplay data
+ * out before play starts.  A resident page is stamped whenever it is looked
+ * up, which happens on every TLB refill and slow-path read.
  */
 #include <libdragon.h>
 #include <malloc.h>
@@ -31,6 +33,7 @@ static int nslots;
 static int16_t page_slot[NPAGES];      /* -1 = not resident */
 static int16_t *slot_page;             /* -1 = free */
 static uint32_t *slot_used;            /* use stamp */
+static uint8_t *slot_pinned;           /* loaded by the boot preload */
 static uint32_t use_clock;
 
 /* the preload list comes with the generated code (gen_rom_preload.c) */
@@ -50,7 +53,8 @@ void rom_cache_init(int bytes) {
         gba_panic("cannot allocate the ROM cache (%d bytes)", bytes);
     slot_page = malloc(sizeof(int16_t) * (size_t)nslots);
     slot_used = calloc((size_t)nslots, sizeof(uint32_t));
-    if (!slot_page || !slot_used)
+    slot_pinned = calloc((size_t)nslots, 1);
+    if (!slot_page || !slot_used || !slot_pinned)
         gba_panic("cannot allocate the ROM cache tables");
     for (int i = 0; i < nslots; i++)
         slot_page[i] = -1;
@@ -73,12 +77,20 @@ void gba_rom_map_init(void) {
 }
 
 static uint8_t *load_page(uint32_t pg) {
-    /* a free slot, else the least recently used one */
-    int s = 0;
+    /* a free slot, else the least recently used unpinned one, else the
+     * least recently used pinned one */
+    int s = -1, sp = -1;
     for (int i = 0; i < nslots; i++) {
         if (slot_page[i] < 0) { s = i; break; }
-        if (slot_used[i] < slot_used[s]) s = i;
+        if (slot_pinned[i]) {
+            if (sp < 0 || slot_used[i] < slot_used[sp]) sp = i;
+        } else if (s < 0 || slot_used[i] < slot_used[s]) {
+            s = i;
+        }
     }
+    if (s < 0)
+        s = sp;
+    slot_pinned[s] = 0;
     if (slot_page[s] >= 0) {
         uint32_t old = (uint32_t)slot_page[s];
         page_slot[old] = -1;
@@ -112,6 +124,7 @@ void rom_cache_preload(void) {
         if (!free_slot)
             break;
         load_page(pg);
+        slot_pinned[page_slot[pg]] = 1;
         rom_cache_stats.misses--;
         rom_cache_stats.preloaded++;
     }
