@@ -42,7 +42,10 @@ compile() {
     fi
 }
 for s in $SRCS; do
-    o="$OUT/obj/$(basename "${s%.c}").o"
+    # object names keep the directory (runtime/native.c, games/G/native.c)
+    o="${s#$REPO/}"
+    o="$OUT/obj/${o//\//_}"
+    o="${o%.c}.o"
     compile "$s" "$o" &
     OBJS="$OBJS $o"
 done
