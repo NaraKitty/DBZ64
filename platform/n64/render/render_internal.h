@@ -1,0 +1,173 @@
+/*
+ * render_internal.h - shared state of the N64 GBA renderer (gba_render*.c).
+ */
+#ifndef RENDER_INTERNAL_H
+#define RENDER_INTERNAL_H
+
+#include <stdint.h>
+#include <stdbool.h>
+#include "gba_render.h"
+#include "io.h"
+
+#if !GBA_BIG_ENDIAN
+#error "the N64 renderer assumes the big-endian native-word guest memory layout"
+#endif
+
+/* ------------------------------------------------------------ guest memory */
+
+static inline uint32_t r_vram8(uint32_t o) {
+    return ((const uint8_t *)gba_mem.vram)[o ^ GBA_BX];
+}
+static inline uint32_t r_vram16(uint32_t o) {
+    return *(const uint16_t *)((const uint8_t *)gba_mem.vram + (o ^ GBA_HX));
+}
+static inline uint32_t r_oam16(uint32_t o) {
+    return *(const uint16_t *)((const uint8_t *)gba_mem.oam + (o ^ GBA_HX));
+}
+static inline uint32_t r_pal16(uint32_t i) {
+    return *(const uint16_t *)((const uint8_t *)gba_mem.pal + ((i * 2) ^ GBA_HX)) & 0x7FFFu;
+}
+/* VRAM is 96KB mirrored in 128KB blocks, the last 32KB repeating 0x10000.. */
+static inline uint32_t r_vram_wrap(uint32_t o) {
+    o &= 0x1FFFFu;
+    return o >= 0x18000u ? o - 0x8000u : o;
+}
+static inline int32_t r_sext28(uint32_t v) {
+    return (int32_t)(v << 4) >> 4;
+}
+/* GBA BGR555 -> N64 RGBA5551 (opaque) */
+static inline uint16_t r_conv(uint32_t c) {
+    return (uint16_t)(((c & 31) << 11) | (((c >> 5) & 31) << 6) | (((c >> 10) & 31) << 1) | 1);
+}
+
+/* ------------------------------------------------------------ target */
+
+/* Where the frame is being drawn: the display (16-bit, COPY mode) or the
+ * 32-bit blend intermediate (1-cycle mode).  All draw helpers take GBA
+ * screen coordinates; (tx,ty) is the target position of GBA pixel (0,0). */
+typedef struct {
+    int tx, ty;
+    int gx0, gy0, gx1, gy1;     /* region being drawn, GBA coordinates */
+    int is32;
+} rtarget_t;
+extern rtarget_t R;
+
+enum { PAL_BG = 0, PAL_OBJ = 1, PAL_DIRECT = 2 };   /* DIRECT = RGBA16 texels, no TLUT */
+enum { FX_PLAIN = 0, FX_BRIGHT = 1, FX_ALPHA = 2 };  /* colour effect applied to a layer */
+
+/* Select pipeline + palette for following draws. */
+void r_bind(int pal, int fx);
+/* Per-channel 5-bit colour remap for 'fx' (identity for FX_PLAIN); used by
+ * CPU-converted direct-colour layers. */
+const uint8_t *r_tau(int fx);
+/* Scissor in GBA coordinates (clipped to the region). */
+void r_scissor(int gx0, int gy0, int gx1, int gy1);
+void r_scissor_region(void);
+/* Texture rectangle with TILE0 at GBA coordinates; vflip draws rows bottom-up,
+ * hflip columns right-to-left (not in COPY mode: OBJ pipelines only). */
+void r_texrect(int gx, int gy, int w, int h, int s, int t, int vflip, int hflip);
+
+/* The clip window and pipeline that r_texrect works with (set by r_scissor
+ * and r_bind).  Hot loops copy it into a local and emit rectangles with
+ * r_rect straight into the raw command buffer. */
+typedef struct {
+    int tx, ty;                 /* target position of GBA pixel (0,0) */
+    int x0, y0, x1, y1;         /* clip rectangle, target coordinates */
+    int copy;                   /* COPY mode (else 1-cycle) */
+} rclip_t;
+extern rclip_t r_clip;
+
+/* Write the TEXTURE_RECTANGLE for r_texrect's arguments at p (2 words the
+ * caller has reserved), clipped to c; returns the new write position (p if
+ * the rectangle was clipped away) and adds the pixels covered to *px. */
+static inline uint64_t *r_rect(uint64_t *p, const rclip_t *c, int gx, int gy, int w, int h,
+                               int s, int t, int vflip, int hflip, uint32_t *px) {
+    int x = gx + c->tx, y = gy + c->ty;
+    if (hflip) s += w - 1;                  /* texel of the leftmost pixel */
+    if (x < c->x0) {
+        int d = c->x0 - x;
+        s += hflip ? -d : d;
+        w -= d; x = c->x0;
+    }
+    if (x + w > c->x1) w = c->x1 - x;
+    if (w <= 0) return p;
+    if (y < c->y0) {
+        int d = c->y0 - y;
+        if (!vflip) t += d;                 /* flipped: the clipped rows are the last texels */
+        h -= d; y = c->y0;
+    }
+    if (y + h > c->y1) {
+        int d = y + h - c->y1;
+        if (vflip) t += d;
+        h -= d;
+    }
+    if (h <= 0) return p;
+    /* COPY mode: inclusive right/bottom edge and 4 texels per clock */
+    int copy = c->copy;
+    int xh = (x + w - copy) * 4, yh = (y + h - copy) * 4;
+    uint32_t dsdx = copy ? 0x1000 : hflip ? 0xFC00 : 0x400, dtdy = 0x400;
+    if (vflip) { t += h - 1; dtdy = 0xFC00; }
+    p[0] = (0x24ull << 56) | ((uint64_t)xh << 44) | ((uint64_t)yh << 32) |
+           ((uint64_t)(x * 4) << 12) | (uint64_t)(y * 4);
+    p[1] = ((uint64_t)(uint16_t)(s * 32) << 48) | ((uint64_t)(uint16_t)(t * 32) << 32) |
+           ((uint64_t)dsdx << 16) | dtdy;
+    *px += (uint32_t)(w * h);
+    return p + 2;
+}
+
+/* Blit a screen-aligned linear image (CI8 or RGBA16) at GBA (gx,gy). */
+void r_blit_image(const void *buf, int pitch_bytes, tex_format_t fmt, int gx, int gy, int w, int h);
+
+extern gba_render_stats_t r_stats;
+extern uint32_t r_frame;            /* frame counter, starts at 1 */
+extern const gba_view_t *r_view;
+
+/* add the work of n rectangles covering px pixels in the current pipeline to the stats */
+static inline void r_rect_stats(const rclip_t *c, uint32_t n, uint32_t px) {
+    r_stats.rects += n;
+    if (c->copy) r_stats.px_copy += px; else r_stats.px_1cyc += px;
+}
+
+/* per-frame uncached scratch memory for the RDP (16-byte aligned); when full it
+ * waits for the RDP and starts over (so a caller must be done writing a block
+ * before it asks for the next one); NULL only for more than the whole scratch */
+void *r_scratch(uint32_t bytes);
+/* large uncached raster buffers (affine/bitmap BG), one per BG 2/3 */
+void *r_raster_buf(int which, uint32_t bytes);
+
+/* ------------------------------------------------------------ BG */
+
+void bg_init(void);
+void bg_invalidate(void);
+void bg_invalidate_layer(int n);
+void bg_track(uint32_t dirty_pages);            /* pages 0..15 */
+void bg_draw_text(int n, int fx);
+void bg_draw_affine(int n, int fx);             /* mode 1/2 rotation-scaling BG */
+void bg_draw_bitmap(int mode, uint32_t dispcnt, int fx);   /* modes 3/4/5, BG2 */
+#ifdef GBA_RENDER_TRACE
+extern uint32_t bg_trace_grp[4];                /* changed BG chunks per 16KB group, this frame */
+extern uint32_t bg_trace_cmp;                   /* BG chunks compared with the shadow, this frame */
+#endif
+
+/* ------------------------------------------------------------ OBJ */
+
+typedef struct {
+    int16_t x, y;           /* hardware position (x signed 9-bit, y 0..255) */
+    uint8_t w, h, bw, bh;   /* size and bounding box */
+    uint8_t prio, semi, bpp8, hf, vf, affine, ident, own_pos;
+    uint16_t tile;
+    uint8_t pbank;          /* OBJ palette bank (4bpp) */
+    int32_t pa, pb, pc, pd;
+} objinfo_t;
+
+void obj_init(void);
+void obj_invalidate(void);
+void obj_track(uint32_t dirty_pages);           /* pages 16..23 as bits 0..7 */
+/* parse OAM; returns per-priority lists of visible OBJ indices in draw order (127..0) */
+int obj_parse(uint32_t dispcnt, uint8_t lists[4][128], int counts[4]);
+/* bring the OBJ shadow up to date for the listed sprites (render_obj.c) */
+void obj_prepare(uint8_t lists[4][128], const int counts[4]);
+const objinfo_t *obj_info(int i);
+void obj_draw(int i, int fx);
+
+#endif
