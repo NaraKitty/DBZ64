@@ -119,19 +119,34 @@ static void dma_transfer(int ch) {
         s &= ~1u;
         t &= ~1u;
     }
-    if (dinc > 0)
-        gba_mem_touch(t, span + sz);
     uint8_t *hs = gba_host_ptr(s), *ht = gba_host_wptr(t);
+    /* VRAM destinations on the fast path are marked dirty only if the copy
+     * changes them: the game re-uploads identical tiles every frame, and
+     * every dirty page costs the renderer a re-check */
+    int vram_cmp = (t >> 24) == 0x06 && dinc > 0 && sinc > 0 && hs && ht;
+    if (dinc > 0 && !vram_cmp)
+        gba_mem_touch(t, span + sz);
     int fast = hs && ht && dinc > 0 && sinc >= 0 &&
                (uint8_t *)gba_host_ptr(s + (sinc ? span : 0)) == hs + (sinc ? span : 0) &&
                (uint8_t *)gba_host_wptr(t + span) == ht + span;
     if (fast && !word && (((s | t) & 3) || (n & 1)))
         fast = 0;
+    if (vram_cmp && !fast)
+        gba_mem_touch(t, span + sz);
     if (fast) {
         /* contiguous host memory; 16-bit units on word boundaries copy as words */
         uint32_t nw = word ? n : n / 2;
         uint32_t *ws = (uint32_t *)hs, *wt = (uint32_t *)ht;
-        if (sinc && nw <= 16) {
+        if (vram_cmp) {
+            uint32_t diff = 0;
+            for (uint32_t k = 0; k < nw; k++) {
+                uint32_t v = ws[k];
+                diff |= v ^ wt[k];
+                wt[k] = v;
+            }
+            if (diff)
+                gba_mem_touch(t, span + sz);
+        } else if (sinc && nw <= 16) {
             /* tile-sized copies (most of the game's DMAs): forward word
              * copy like the hardware, without a library call */
             while (nw >= 4) {

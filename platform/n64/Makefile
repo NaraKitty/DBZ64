@@ -16,7 +16,10 @@ include $(N64_INST)/include/n64.mk
 RUNTIME_SRC := runtime/mem.c runtime/io.c runtime/bios.c runtime/dispatch.c \
                runtime/runtime.c runtime/interp.c runtime/ppu_soft.c runtime/native.c \
                $(patsubst $(REPO)/%,%,$(wildcard $(REPO)/runtime/widescreen.c))
-PLATFORM_SRC := $(wildcard $(REPO)/platform/n64/*.c) $(if $(USE_RDP),$(wildcard $(REPO)/platform/n64/render/*.c))
+# USE_RDP=1 (default): draw with the RDP renderer (platform/n64/render);
+# USE_RDP=0: the CPU reference renderer (runtime/ppu_soft.c, native view only)
+USE_RDP ?= 1
+PLATFORM_SRC := $(wildcard $(REPO)/platform/n64/*.c) $(if $(filter 1,$(USE_RDP)),$(wildcard $(REPO)/platform/n64/render/*.c))
 PLATFORM_SRC := $(patsubst $(REPO)/%,%,$(PLATFORM_SRC))
 GEN_SRC := $(wildcard $(GEN)/gen_*.c)
 
@@ -28,8 +31,7 @@ TLB ?= 1
 ifeq ($(TLB),1)
 MODE_FLAGS := -DGBA_TLB
 endif
-# USE_RDP=1: draw with the RDP renderer (platform/n64/render)
-ifdef USE_RDP
+ifeq ($(USE_RDP),1)
 MODE_FLAGS += -DUSE_RDP
 endif
 
