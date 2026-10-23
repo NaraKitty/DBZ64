@@ -31,7 +31,7 @@ games (the same engine and toolchain). Each game directory holds:
 - `game.h`: what the runtime and the platforms need: the IRQ dispatcher's
   handler table, flags word, return sentinel and test order, the ROM identity
   (game code, SHA-1), the N64 cartridge title and SRAM save magic.
-- C sources compiled into that game's build (for LoG2, the 320×240 field view
+- C sources compiled into that game's build (the 320×240 field view
   `widescreen.c`).
 
 `GAME=log2|buu` selects the game in `platform/host/build.sh`, the N64
@@ -52,8 +52,12 @@ adapter libraries and ARM soft-float code. What differs from LoG2:
   routine, is native (`games/buu/native.c`).
 - The sound engine, mixer and FIFO model are LoG2's (`native_mix_voice` and
   `native_clip` apply unchanged).
-- No 320×240 field view yet: `games/buu/widescreen.c` always gives the
-  native view.
+- The 320×240 field view (`games/buu/widescreen.c`, `docs/WIDESCREEN.md`,
+  "Buu's Fury") is LoG2's design with this game's addresses. Three things
+  are new: the view also stays inside what the parallax layers can show,
+  an empty layer class is accepted, and the field view stays on while the
+  game pauses the field. Some emitters add signed y offsets as unsigned
+  bytes, and their hooks correct for it.
 
 Status: the host build plays from power-on through the logos, title, a new
 game and the story intro into gameplay with no dispatch misses. It matches
@@ -71,10 +75,11 @@ and keeps the save in SRAM. Game logic in ares: logos 1–2.5 ms, title
 ~7 ms, story scenes 3–7.5 ms, field gameplay 5.8–6.2 ms per frame. Code is
 3.27 MB of MIPS and BSS 1.6 MB.
 
-Open: the field view; the RDP renderer for Buu's Fury (the CPU renderer
-needs ~70 ms per frame); register summaries of the ARM soft-float routines
-(their save/restore of r4–r11 is not recognised, which widens the indirect
-call summary by r8–r11); the link-cable and wireless modes only reach
+Open: the RDP renderer for Buu's Fury (the CPU renderer needs ~70 ms per
+frame, and the RDP build only fits with a ROM cache of about 512 KB instead
+of 2 MB); register summaries of the ARM soft-float routines (their
+save/restore of r4–r11 is not recognised, which widens the indirect call
+summary by r8–r11); the link-cable and wireless modes only reach
 "Waiting for a friend..." (cancel works; serial is not modelled); a game
 progress save (only the options block has been written so far); coverage
 beyond the start of the story (about 1,060 of the 4,435 functions have run).

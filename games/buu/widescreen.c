@@ -485,10 +485,10 @@ static int setup_layer(int bg, uint32_t obj, uint32_t vt) {
     return 1;
 }
 
-/* A field the game stops presenting while it stays on screen (while B is
- * held the hero charges up inside a ring: 40-110 frames, and the sprite
- * build keeps running) keeps the field view, so the picture does not jump
- * to the centred native frame and back.  It must be the field of the last
+/* A field the game stops presenting while it stays on screen (the
+ * targeting mode while B is held: 40-110 frames, and the sprite build keeps
+ * running) keeps the field view, so the picture does not jump to the
+ * centred native frame and back.  It must be the field of the last
  * presented frame: the same layer objects, every scroll register
  * unchanged. */
 static int field_prev;                   /* field view in the previous frame */
