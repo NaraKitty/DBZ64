@@ -117,22 +117,49 @@ static inline __attribute__((always_inline)) void tile_gather(uint32_t stride_fi
     for (int i = 0; i < 8; i++)
         wr32(sp - 32 + 4 * (uint32_t)i, 0);
     uint32_t r0 = 0, r2 = 0, r12 = 0;
-    /* both sides in plain RAM: no per-access address translation */
+    /* both sides in plain RAM, or RAM/ROM to VRAM: no per-access address
+     * translation */
     uint32_t ntiles = (rows / 8) * (width / 8);
     const uint32_t *hs = NULL;
     uint32_t *hd = NULL;
+    int vram = 0;
     if (!(rows & 7) && !(width & 7) && rows && width && !(stride & 3) && !(base & 3) &&
         stride < 0x10000u && rows <= 0x1000u) {
         hs = src_span(base, stride * (rows - 1) + width);
         hd = ram_span(out, ntiles * 64);
+        if (!hd && (out >> 24) == 0x06 && (out & 0x1FFFFu) + ntiles * 64 <= 0x18000u) {
+            hd = gba_mem.vram + (out & 0x1FFFFu) / 4;
+            vram = 1;
+        }
     }
     if (hs && hd) {
         uint32_t sw = stride / 4;
+        int touched = 0;
         for (uint32_t band = 0; band < rows; band += 8) {
             r2 = base + band * stride;
             const uint32_t *col = hs + band * sw;
             for (uint32_t w = 0; w < width; w += 8, col += 2) {
                 const uint32_t *s = col;
+                if (vram && !touched) {
+                    /* VRAM tiles that are already there are not written
+                     * (no dirty cache lines); VRAM is marked dirty from the
+                     * first tile that changes (the renderer re-checks every
+                     * dirty page) */
+                    uint32_t diff = 0;
+                    for (int g = 0; g < 4; g++, s += 2 * sw)
+                        diff |= (s[0] ^ hd[4 * g]) | (s[1] ^ hd[4 * g + 1]) |
+                                (s[sw] ^ hd[4 * g + 2]) | (s[sw + 1] ^ hd[4 * g + 3]);
+                    s = col;
+                    if (!diff) {
+                        hd += 16;
+                        r12 = s[7 * sw + 1];
+                        r0 = r2 + 8 * stride;
+                        r2 += 8;
+                        continue;
+                    }
+                    gba_mem_touch(out, ntiles * 64);
+                    touched = 1;
+                }
                 for (int g = 0; g < 4; g++, s += 2 * sw) {
                     uint32_t a = s[0], b = s[1], c = s[sw], d = s[sw + 1];
                     hd[0] = a; hd[1] = b; hd[2] = c; hd[3] = d;
