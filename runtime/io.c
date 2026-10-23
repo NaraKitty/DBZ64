@@ -250,14 +250,23 @@ static void audio_block(void) {
 
 static int in_irq;
 
-static void run_handler(uint32_t handler) {
+/* Registers as the dispatcher leaves them at 'bx r0' (0x03000930): handlers
+ * rely on some of them (the sound handler restarts the FIFO DMAs relative to
+ * r3 = 0x04000200).  It runs in System mode on the interrupted stack after
+ * pushing one word there.  The dispatcher passes its continuation in r4 and
+ * the sound handler returns with 'bx r4'; that continuation unwinds a frame
+ * we never build, so r4 gets the same return sentinel as lr. */
+static void run_handler(uint32_t handler, uint32_t ack_word, int dma2) {
     gba_cpu_t saved = cpu;
-    /* System mode on the interrupted (user) stack, like the dispatcher.  The
-     * dispatcher passes its continuation in r4 and the sound handler returns
-     * with 'bx r4'; that continuation unwinds a frame we never build, so r4
-     * gets the same return sentinel as lr: either way the handler is done. */
     cpu.r[0] = handler;
+    cpu.r[1] = IRQ_TABLE;
+    cpu.r[2] = ack_word;
+    cpu.r[3] = 0x04000200u;
     cpu.r[4] = IRQ_RET_LR;
+    cpu.r[5] = 0x92u;                     /* CPSR of the IRQ mode it came from */
+    cpu.r[12] = dma2 ? 0x9Fu : 0x1Fu;
+    cpu.r[13] -= 4;                       /* the IRQ-mode lr pushed by 'str lr, [sp, #-4]!' */
+    wr32(cpu.r[13], 0x00000138u);
     cpu.r[14] = IRQ_RET_LR;
     gba_call(handler);
     cpu = saved;
@@ -294,7 +303,10 @@ void gba_irq_service(void) {
         W16(REG_IF, R16(REG_IF) & ~bit);
         *(uint16_t *)((uint8_t *)gba_mem.iwram + ((IRQ_FLAGS & 0x7FFE) ^ GBA_HX)) |= bit;
         uint32_t handler = gba_mem.iwram[((IRQ_TABLE + idx) & 0x7FFC) >> 2];
-        run_handler(handler);
+        /* the word the dispatcher wrote to IE|IF<<16: IE (minus the source
+         * unless it is DMA2) with the acknowledged bit in the IF half */
+        uint32_t ack = (bit == 0x0400 ? ie : (uint16_t)(ie & ~bit)) | ((uint32_t)bit << 16);
+        run_handler(handler, ack, bit == 0x0400);
         W16(REG_IE, ie);
         W16(REG_IME, ime);
     }
