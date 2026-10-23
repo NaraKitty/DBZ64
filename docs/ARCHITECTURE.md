@@ -85,7 +85,37 @@ runtime/*.c (GBA hardware model) + platform/{host,n64}/*.c ◀──────
 **Saves:** the 64 Kbit (8 KB) EEPROM's bit-serial protocol is emulated. On N64
 it is stored in 32 KB cartridge SRAM.
 
-## N64 platform (`platform/n64/`) — in progress
+## Measurements (ares, N64 + Expansion Pak)
+
+These figures are game-logic CPU time per frame (recompiled code plus the
+runtime, including IRQs, mixing and DMA), with drawing excluded:
+
+| Scene | Time per frame |
+|---|---|
+| Logos and title | 1–2.3 ms |
+| Story cutscenes | ~8 ms |
+| Field gameplay | 8–10.5 ms |
+
+The frame budget is 16.7 ms. The RDP renderer's CPU side has to fit in the
+remainder; the RDP itself works in parallel.
+
+**Memory:**
+- Code: 1.66 MB of MIPS from 67.5k guest instructions, with TLB-mapped memory
+  accesses.
+- BSS: 1.5 MB.
+- ROM page cache: 2 MB.
+
+**Fault-emulated accesses** run at about 3 per frame in steady state: the sound
+IRQ handler's DMA register writes, which use a register-relative address.
+
+**Verification:**
+- The host build is deterministic.
+- The native mixer routines produce byte-identical audio to the recompiled
+  originals.
+- Frames are compared against the software reference renderer, and that
+  renderer was fuzzed against an independent model.
+
+## N64 platform (`platform/n64/`)
 
 **Video:**
 - The RDP draws GBA layers from guest VRAM as CI8 texture rectangles with TLUT
