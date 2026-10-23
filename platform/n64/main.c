@@ -33,7 +33,10 @@ void gba_boot(void);
 
 /* ------------------------------------------------------------ config */
 
+/* RDRAM for resident GBA ROM pages: at most 2MB, and what the heap has left
+ * after everything else (main() below) */
 #define ROM_CACHE_BYTES  (2 * 1024 * 1024)
+#define ROM_HEAP_RESERVE (192 * 1024)
 #define GAME_STACK       (256 * 1024)
 /* the GBA produces 267.52 samples per frame; we show one GBA frame per N64
  * refresh, so the audio rate follows the N64 refresh rate */
@@ -599,7 +602,23 @@ int main(void) {
     if (test.active)
         prof_watchdog_start();
     load_save();
-    rom_cache_init(ROM_CACHE_BYTES);
+    /* the game stack first: the ROM cache then takes what is left, up to
+     * ROM_CACHE_BYTES, keeping ROM_HEAP_RESERVE for later allocations (the
+     * renderer's affine/bitmap raster buffers, libc) */
+    uint8_t *stack = memalign(16, GAME_STACK);
+    if (!stack)
+        gba_panic("cannot allocate the game stack (%d bytes)", GAME_STACK);
+    {
+        heap_stats_t hs0;
+        sys_get_heap_stats(&hs0);
+        int cache = hs0.total - hs0.used - ROM_HEAP_RESERVE;
+        if (cache > ROM_CACHE_BYTES)
+            cache = ROM_CACHE_BYTES;
+        cache &= ~0x3FFF;
+        debugf("heap: %d of %d bytes used, %d free; ROM cache %d KB\n", hs0.used, hs0.total,
+               hs0.total - hs0.used, cache / 1024);
+        rom_cache_init(cache);
+    }
     rom_cache_preload();
     debugf("rom cache: %lu pages preloaded\n", (unsigned long)rom_cache_stats.preloaded);
 #ifdef GBA_TLB
@@ -615,7 +634,6 @@ int main(void) {
         debugf("self-test: TLB modification exceptions unavailable, VRAM tracking off\n");
 #endif
     t_last = get_ticks();
-    uint8_t *stack = memalign(16, GAME_STACK);
     heap_stats_t hs;
     sys_get_heap_stats(&hs);
     debugf("heap: %d of %d bytes used, %d free\n", hs.used, hs.total, hs.total - hs.used);

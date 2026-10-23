@@ -7,11 +7,13 @@
 #include "rom.h"
 
 gba_mem_t gba_mem;
-uintptr_t gba_rd_page[0x10000];
-uintptr_t gba_wr_page[0x10000];
 
 /* open-bus approximation: last value seen on a ROM-ish read */
 static uint32_t open_bus;
+
+#ifndef GBA_TLB
+uintptr_t gba_rd_page[0x10000];
+uintptr_t gba_wr_page[0x10000];
 
 static void map_range(uint32_t base, uint32_t span, void *host, uint32_t size, int writable) {
     /* map [base, base+span) onto host[0..size) with mirroring every 'size' */
@@ -29,6 +31,13 @@ void gba_mem_map_rom_page(uint32_t page, const void *host) {
         gba_rd_page[idx] = host ? (uintptr_t)host : GBA_PAGE_SLOW;
     }
 }
+#else
+/* no page tables (gba.h GBA_PAGE_RD): the ROM cache answers lookups */
+void gba_mem_map_rom_page(uint32_t page, const void *host) {
+    (void)page;
+    (void)host;
+}
+#endif
 
 #ifdef GBA_TLB
 /* generated code writes VRAM through the TLB: protection works on 16KB
@@ -41,6 +50,7 @@ void tlb_vram_set_writable(uint32_t page4k, int writable);
 
 void gba_mem_init(void) {
     memset(&gba_mem, 0, sizeof(gba_mem));
+#ifndef GBA_TLB
     for (int i = 0; i < 0x10000; i++) {
         gba_rd_page[i] = GBA_PAGE_SLOW;
         gba_wr_page[i] = GBA_PAGE_SLOW;
@@ -63,6 +73,7 @@ void gba_mem_init(void) {
         gba_rd_page[(a >> 12) & 0xFFFF] = p;
         gba_wr_page[(a >> 12) & 0xFFFF] = p;
     }
+#endif
     /* invariant: a page's dirty bit is set exactly when it is writable;
      * everything starts dirty, gba_vram_take_dirty() re-protects */
     gba_vram_dirty = 0xFFFFFF;
@@ -86,8 +97,7 @@ static void vram_set_protect(uint32_t page, int protect) {
      * pushed VRAM-bound DMAs off the fast path. */
     (void)page;
     (void)protect;
-    return;
-#endif
+#else
     /* page 0..23 is mapped at every 128KB mirror; pages 16..23 also appear
      * at offsets 0x18000..0x1FFFF of each mirror */
     for (uint32_t base = 0x06000; base < 0x07000; base += 0x20) {
@@ -99,6 +109,7 @@ static void vram_set_protect(uint32_t page, int protect) {
             gba_wr_page[idx[k]] = protect ? (p | GBA_PAGE_SLOW) : p;
         }
     }
+#endif
 }
 
 
@@ -160,7 +171,7 @@ static uint32_t pal_oam_rd32(uint32_t a) {
 uint32_t gba_rd32_slow(uint32_t a) {
     uint32_t al = a & ~3u;
     uint32_t v;
-    uintptr_t p = gba_rd_page[(al >> 12) & 0xFFFF];
+    uintptr_t p = GBA_PAGE_RD(al);
     if (!(p & GBA_PAGE_SLOW)) {
         v = *(const uint32_t *)(p + (al & 0xFFF));
         return rot_read32(v, a);
@@ -192,7 +203,7 @@ uint32_t gba_rd32_slow(uint32_t a) {
 uint32_t gba_rd16_slow(uint32_t a) {
     uint32_t al = a & ~1u;
     uint32_t v;
-    uintptr_t p = gba_rd_page[(al >> 12) & 0xFFFF];
+    uintptr_t p = GBA_PAGE_RD(al);
     if (!(p & GBA_PAGE_SLOW)) {
         v = *(const uint16_t *)(p + ((al & 0xFFF) ^ GBA_HX));
     } else {
@@ -226,7 +237,7 @@ uint32_t gba_rd8_slow(uint32_t a) {
  * from DMA out of EEPROM or I/O (the boot-time save load) and from
  * emulated unaligned stores (TLB builds) */
 static inline uintptr_t ram_page(uint32_t a) {
-    return gba_wr_page[(a >> 12) & 0xFFFF];
+    return GBA_PAGE_WR(a);
 }
 
 void gba_wr32_slow(uint32_t a, uint32_t v) {

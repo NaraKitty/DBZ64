@@ -114,14 +114,15 @@ static uint8_t *load_page(uint32_t pg) {
 void rom_cache_preload(void) {
     if (!&gba_rom_preload_n)
         return;
+    /* pinned pages are only evicted when nothing else is left, and a page
+     * loaded then is the next one to go: keep an eighth of the cache for
+     * pages loaded on demand, whatever the list holds */
+    int limit = nslots - nslots / 8;
     for (int i = 0; i < gba_rom_preload_n; i++) {
         uint32_t pg = gba_rom_preload[i];
         if (pg >= NPAGES || page_slot[pg] >= 0)
             continue;
-        int free_slot = 0;
-        for (int k = 0; k < nslots; k++)
-            if (slot_page[k] < 0) { free_slot = 1; break; }
-        if (!free_slot)
+        if ((int)rom_cache_stats.preloaded >= limit)
             break;
         load_page(pg);
         slot_pinned[page_slot[pg]] = 1;
@@ -142,6 +143,18 @@ const void *rom_page16_load(uint32_t va16k, int load) {
     }
     return load ? load_page(pg) : NULL;
 }
+
+#ifdef GBA_TLB
+/* the 4KB page of a resident ROM address, or NULL (gba.h GBA_PAGE_RD: what
+ * the page tables of non-TLB builds hold; no load, no use stamp) */
+const void *gba_rom_page_host(uint32_t a) {
+    uint32_t off = a & 0x00FFF000u;
+    if (off >= GBA_ROM_SIZE)
+        return NULL;
+    int s = page_slot[off / PAGE];
+    return s >= 0 ? slots + (size_t)s * PAGE + (off & (PAGE - 1)) : NULL;
+}
+#endif
 
 uint32_t gba_rom_read32(uint32_t a) {
     uint32_t off = a & 0x01FFFFFCu;
