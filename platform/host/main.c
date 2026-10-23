@@ -6,6 +6,8 @@
  *
  *   dbz --rom baserom.gba [--frames N] [--shot F,F,..] [--every K]
  *       [--out DIR] [--keys "F-F:KEY+KEY;F:KEY"] [--save file] [--wav file]
+ *       [--ws] [--ws-native] [--ws-debug] [--ws-off] [--ws-nodespawn]
+ *       [--ws-force-decode] [--ws-decode-test]
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -249,6 +251,66 @@ static void write_save(void) {
 
 static uint16_t fb[240 * 160];
 
+/* --ws: 320x240 frames through the widescreen view (runtime/widescreen.h);
+ * --ws-native: also write the native frame as native_NNNNN.png;
+ * --ws-debug: per-shot view stats, sprite classes and a BG seam check;
+ * --ws-off: compile-time hooks present but the feature disabled;
+ * --ws-nodespawn: keep the native off-screen despawn bounds */
+static int ws_mode, ws_native_too, ws_debug;
+static uint16_t fb_ws[WS_W * WS_H];
+
+static void ws_print_line(const char *s) {
+    fprintf(stderr, "[ws f%d]   %s\n", frame, s);
+}
+
+/* --ws-decode-test: decode every authored map chunk of every field layer
+ * resource (factory 0x080056A1) and write "desc crc ok" lines to
+ * OUT/decode_test.txt (compared against an independent decoder offline) */
+static int ws_decode_test;
+
+static void ws_run_decode_test(void) {
+    char path[512];
+    snprintf(path, sizeof path, "%s/decode_test.txt", outdir);
+    FILE *f = fopen(path, "w");
+    if (!f) { perror(path); return; }
+    static uint8_t seen[0x800000 / 4];
+    static uint8_t buf[0x800];
+    int n = 0, bad = 0;
+    for (uint32_t off = 0; off + 0x18 <= rom_size; off += 4) {
+        if (rom_words[off / 4] != 0x080056A1u)
+            continue;
+        uint32_t res = 0x08000000u + off;
+        uint32_t cr = rd32(res + 0x14);
+        uint32_t cols = cr & 0xFF, rows = (cr >> 8) & 0xFF;
+        if (!cols || !rows || cols * rows > 0xFF || off + 0x18 + 4 * cols * rows > rom_size)
+            continue;
+        for (uint32_t i = 0; i < cols * rows; i++) {
+            uint32_t d = rd32(res + 0x18 + 4 * i);
+            if (d < 0x08000000u || d >= 0x08000000u + rom_size || seen[(d - 0x08000000u) / 4])
+                continue;
+            seen[(d - 0x08000000u) / 4] = 1;
+            int ok = ws_debug_decode(d, buf);
+            n++;
+            bad += !ok;
+            fprintf(f, "%08X %08X %d\n", (unsigned)d, (unsigned)crc32_upd(0, buf, sizeof buf), ok);
+        }
+    }
+    fclose(f);
+    fprintf(stderr, "[ws] decode test: %d descriptors, %d failed -> %s\n", n, bad, path);
+}
+
+static void ws_debug_frame(void) {
+    const ws_stats_t *s = ws_get_stats();
+    int cells = 0, bad = ws_debug_check_bg(&cells);
+    fprintf(stderr, "[ws f%d] field=%d L=%d T=%d W=%d H=%d OX=%d OY=%d slots=%d (max %d) exact x %d y %d "
+            "screen %d decodes %d skipped %d bgcheck %d/%d bad\n",
+            frame, s->field, s->L, s->T, s->W, s->H, s->OX, s->OY, s->slots_used, s->slots_max,
+            s->slots_exact_x, s->slots_exact_y, s->slots_screen, s->chunk_decodes, s->emit_skipped,
+            bad, cells);
+    if (ws_debug > 1)
+        ws_debug_dump_objs(ws_print_line);
+}
+
 /* --dump-state F,F,..: write the video state (IO, palette, VRAM, OAM and the
  * per-line register snapshots) as GBA little-endian bytes, for renderer
  * tests.  Layout: "GBAS" u32 version=1, io[0x400], pal[0x400],
@@ -327,7 +389,30 @@ void plat_frame(void) {
             dump_state(path);
             want = 1;
         }
-    if (want) {
+    if (ws_decode_test) {
+        ws_run_decode_test();
+        finish();
+        exit(0);
+    }
+    if (ws_mode) {
+        /* the view is fetched every frame: that is what turns the culling
+         * widening on (widescreen.h), screenshots or not */
+        ws_view_t view;
+        ws_get_view(&view);
+        if (want) {
+            char path[512];
+            ppu_soft_render_view(fb_ws, &view);
+            snprintf(path, sizeof path, "%s/frame_%05d.png", outdir, frame);
+            write_png(path, fb_ws, WS_W, WS_H);
+            if (ws_native_too) {
+                ppu_soft_render(fb, 240);
+                snprintf(path, sizeof path, "%s/native_%05d.png", outdir, frame);
+                write_png(path, fb, 240, 160);
+            }
+            if (ws_debug)
+                ws_debug_frame();
+        }
+    } else if (want) {
         char path[512];
         ppu_soft_render(fb, 240);
         snprintf(path, sizeof path, "%s/frame_%05d.png", outdir, frame);
@@ -388,6 +473,13 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--save")) { save_path = v; i++; }
         else if (!strcmp(a, "--wav")) { wav_path = v; i++; }
         else if (!strcmp(a, "--rom-profile")) { rom_profile = 1; }
+        else if (!strcmp(a, "--ws")) { ws_mode = 1; }
+        else if (!strcmp(a, "--ws-native")) { ws_mode = 1; ws_native_too = 1; }
+        else if (!strcmp(a, "--ws-debug")) { ws_mode = 1; ws_debug++; }
+        else if (!strcmp(a, "--ws-off")) { ws_enabled = 0; }
+        else if (!strcmp(a, "--ws-nodespawn")) { ws_widen_despawn = 0; }
+        else if (!strcmp(a, "--ws-decode-test")) { ws_decode_test = 1; }
+        else if (!strcmp(a, "--ws-force-decode")) { ws_debug_flags |= WS_DBG_FORCE_DECODE; }
         else if (!strcmp(a, "--dump-state")) {
             char *dup = strdup(v), *sv = NULL;
             for (char *t = strtok_r(dup, ",", &sv); t && ndumps < 256; t = strtok_r(NULL, ",", &sv))

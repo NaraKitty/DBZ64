@@ -1,0 +1,330 @@
+# 320x240 field view
+
+On field maps the N64 shows a real 320x240 window onto the authored world: the
+map is not stretched. Field maps include towns, the overworld, and the real-time
+battles and bosses that run on field maps. The HUD and dialogue are re-anchored
+toward the screen edges. Every other screen (title, menus, status, logos and
+the mode-1 map) shows the native 240x160 frame centred at (40,40) with a black
+border.
+
+The code is in `runtime/widescreen.[ch]`, and the hook sites are in `tools/game.toml`
+(section "320x240 view"). The host reference renderer is
+`ppu_soft_render_view()`.
+
+## Interface
+
+```c
+ws_frame_begin();      // every VBlank before drawing (runtime/io.c calls it)
+ws_view_t v;
+ws_get_view(&v);       // native view, or the field view with hooks
+```
+
+`ws_view_t` has the same layout as `gba_view_t` in
+`platform/n64/render/gba_render.h`:
+
+- `ox, oy` is where GBA screen pixel (0,0) lands in the framebuffer.
+- `[x0,x1) x [y0,y1)` is the GBA-screen region to draw.
+- In the field view, `ox = -OX` and `oy = -OY`. The region is `[OX, OX+320) x [OY, OY+240)`, with -80 <= OX, OY <= 0.
+
+There are two hooks:
+
+- **`bg_entry(bg, cx, cy, &e)`** takes a world tile cell. World pixel = the full 16-bit
+  BGxHOFS + screen x. It returns 0 to mean "use the hardware map with its usual wrap".
+  - It always returns 0 inside the native screen, so the native area is drawn
+    from exactly the hardware state.
+  - It also returns 0 for wrap layers.
+- **`obj_pos(i, &x, &y)`** gives the full signed top-left of OAM entry i's bounding
+  box. The sprite is drawn there once, with no 9-bit/8-bit wrap.
+
+The culling widening is only active when all of these hold:
+- `ws_enabled` is set.
+- The scene is a field.
+- The platform called `ws_get_view()` during the last frame.
+
+A platform that still renders natively therefore gets the unmodified game.
+
+## Scene detection (`detect_field`)
+
+All of these must hold:
+
+- DISPCNT is mode 0 and not forced blank, with OBJ on.
+- The field present has run in the last 3 VBlanks: `View+0x34` changes.
+- Map size is plausible.
+- For every BG:
+  - BGxCNT uses screen block 28+n, size 0.
+  - The layer object at `0x0300107C+4n` has vtable `0x08023868` (field) or `0x08023C44` (wrap).
+  - The object's BG byte equals n.
+
+Individual BGs may be disabled.
+
+## View rectangle
+
+The camera of the shown frame is `View+0x2C/+0x30`. These are L and T as stored by
+the last layer update at `0x080052B0`, so they match the scroll registers on screen. Map size is
+`View+0x54/+0x58`.
+
+```
+x = L-40 clamped to [0, W-320]   (W < 320: centred, (W-320)/2)
+y = T-40 clamped to [0, H-240]   (H < 240: centred)
+x, y clamped so the native 240x160 stays inside;  OX = x-L, OY = y-T
+```
+
+Shake moves the whole view, as it does natively. On small maps (108 maps are
+narrower than 320, 27 shorter than 240) the map is centred and the backdrop
+shows around it. Gameplay is unchanged.
+
+## Background margins
+
+Field layer objects (vtable `0x08023868`) are laid out like this:
+
+| Offset | Meaning |
+|---|---|
+| +4 | BG index |
+| +8 | resource |
+| +0x1C..0x1F | chunk index owned by each of the 4 slots |
+| +0x28 + slot*0x800 | decoded 32x32-tile chunks |
+
+The resource (factory `0x080056A1`) holds:
+
+| Offset | Meaning |
+|---|---|
+| +4/+8 | parallax fx/fy |
+| +0xC/+0x10 | origin (22.10) |
+| +0x14/+0x15 | cols/rows of 256 px chunks |
+| +0x18 | descriptors |
+
+For a margin cell, `bg_entry`:
+
+1. Maps the cell to its chunk.
+2. Takes the entry from the loaded slot if the layer has that chunk. This keeps runtime map edits.
+3. Otherwise decodes the ROM descriptor into an LRU cache of 32 chunks (64 KB). The decoder is Webfoot's bit-stream LZ, ported from the reference mod's `decode_field_chunk`.
+
+Chunk lookups are cached per layer, 6 runs per frame, so a 32-tile run costs one lookup.
+
+Cells outside the clip get an all-zero (transparent) tile. The clip is:
+- **Factor-1.0 axes:** the map rectangle in layer space, `[origin, origin+W)`.
+- **Other axes:** the chunk grid.
+
+Wrap layers (`0x08023C44`) use the hardware ring, which is their authored repeat.
+
+## Sprites
+
+### Exact coordinates
+
+Every sprite emitter packs coordinates the same way:
+- x: `lsls rd,rs,#23 ; lsrs rd,rd,#7`
+- y: `lsls rd,rs,#24 ; lsrs rd,rd,#24`
+
+`[[hook_before]]` at 34 x sites and 38 y sites records the full signed value of `rs`
+(`ws_px_rN` / `ws_py_rN`). Three y sites pack y-8/-16/-32 as y+0xF8/0xF0/0xE0, so their
+hooks use `_m256`.
+
+The build loop (`0x08006AD8`) is bracketed by these hooks:
+
+| PC | Event |
+|---|---|
+| `0x08006BCE` | shadow OAM cleared |
+| `0x08006BFE` / `0x08006C04` | before / after each object's emit; `[sp]` = OAM write pointer |
+| `0x08006AAE`, `0x080070B0` | shadow uploaded |
+
+After each emit, the entries the object wrote are matched in order against the
+values recorded during that emit by their low 9/8 bits. A repeated value is reused, for
+rows of sprites that share one y.
+
+The side table is published when the shadow is uploaded. At render time it is used only if the
+entry's attr0/attr1 still equal what was emitted.
+
+### Fallback
+
+Entries with no recovered value use a window decode:
+- x: the 9-bit value in `[OX-64, OX+448)`.
+- y: the 8-bit value in `[OY-16, OY+240)`.
+
+### Classification by class
+
+The class comes from the object's vtable.
+
+- **World:**
+  - The isVisible (vt+0xC) is one of the render-cull functions below.
+  - Any unknown class also counts as world, so it keeps its native place in the view.
+- **Screen-space:**
+  - These culls: `0x0800775A`, `0x08019050`, `0x08007CDE`, `0x08012A28`, and the
+    ScreenSprite cull `0x080264A4`.
+  - These vtables:
+
+    | Vtable | Object |
+    |---|---|
+    | `0x0802403C` | dialogue window, a 4x64x64 affine cluster |
+    | `0x0802408C` | top-left HUD strip |
+    | `0x0802527C` | icon at (216,8) |
+    | `0x08024D40` | location banner |
+    | `0x08024EBC` | ScreenSprite |
+    | `0x08025748` | boss HP bar: two 32x8 sprites at (160,y) and (192,y) |
+    | `0x080250D4` | 8x8 sprite at (119,139) |
+    | `0x08025DC8` | 16x32 sprite at (4,25) |
+    | `0x08025E84` | 32x8 sprite at (32,4) |
+    | `0x08025B2C` | cursor placed from a fixed position table |
+
+    The last five use the always-visible cull `0x080264A8`. Their emitters write
+    constant screen positions. Before they were added, the boss HP bar was
+    classed as world and floated in the playfield at native (160,8)+(40,40).
+    Not every always-visible class is screen-space: `0x080255A4` (emit
+    `0x0801021C`) subtracts the camera and stays world.
+
+### Placing screen-space objects
+
+1. Objects the GBA would not show are hidden: their box lies entirely off the native screen.
+2. The rest are grouped into clusters. A cluster is all entries of one object plus any boxes that touch, within 2 px, so a portrait and its text box move together.
+   - HUD pieces (`0x0802408C`, `0x0802527C`, `0x08025748`, `0x08025DC8`,
+     `0x08025E84`) never join by touch. A dialogue window at the top overlaps
+     the HUD strip, and joining them moved the HUD 32 px right while the window
+     opened and closed. The centred window now covers only part of the HUD,
+     which it hides completely on the GBA.
+3. Each cluster snaps by the centre of its box: to the left/centre/right third and the
+   top/middle/bottom third of the 320x240 screen, with a `ws_hud_inset` (8 px) margin for
+   CRT overscan.
+
+The HUD lands in the top-left corner. Dialogue boxes and banners land at bottom-centre, or
+top-centre when the game puts them at the top.
+
+## Culling and despawn (`tools/game.toml`)
+
+The camera rectangle is at `0x0300109C`: L, T, R=L+240, B=T+160.
+
+`[[override_load]]` routes the load of each bound through a widening function:
+- `ws_cull_left/right/top/bottom` for render culling.
+- `ws_despawn_*` for the off-screen despawn tests. These are gated by `ws_widen_despawn`, default 1.
+
+They return the bounds of the 320x240 view, X0 / X0+320 / Y0 / Y0+240, computed from the live camera.
+
+| Kind | Functions | Loads |
+|---|---|---|
+| render cull (all four sides) | 080071FA, 08007A84, 0800FD3E, 08011896, 080136A6, 08013C8E, 0801647A | 28 |
+| despawn | 080138D2, 0801406A, 08014286, 08015FF8, 080161B4, 080168D6, 0801A144, **08013C22** | 32 |
+
+`0x08013C22` was not in the research spec. It is the per-direction off-screen test of
+the directional projectiles (ki blasts). Without it, blasts vanished at the
+native edge.
+
+Two culls compare a screen position against a constant native-screen rectangle
+in ROM rather than against the camera. `ws_scull_*` shifts each bound by the
+view offset of the live camera (left/top by OX/OY, right/bottom by OX+80/OY+80):
+
+| Site | Rectangle | Hooks |
+|---|---|---|
+| isVisible `0x0800ECF8` (debris particles, vt `08024014`) | `{-7,-7,240,160}` at `0x086ADDD8` | loads at 0800ED28/2E/36/3C |
+| rect test `0x0802805C`, called by the beam emitter `0x08014894` for each segment | `{0,0,240,160}` at `0x086E3604` | `ws_hook_recttest` records r1; loads at 0802805E/64/6E/74 widen only when r1 = `0x086E3604` |
+
+Without these, debris vanished and beam segments were not drawn outside the
+native screen. Both rectangles were found by searching ROM for `{x,y,240,160}`
+records referenced from code. A third, `{-7,-7,240,160}` at `0x086F7A14`, is
+used only by `0x08016BD4`, a cull of the mode-1 map's objects.
+
+### How the sites were verified
+
+- **Constant propagation:** CFG constant propagation over every recompiled function finds
+  84 loads of the camera rectangle. All 60 override PCs resolve to the right field
+  (`D:\dbz-n64\scratch\widescreen\verify_toml.py`, outside the repo). The 24 loads that are not overridden are:
+  - screen-position computations: 080136B0/B8, 08013CBC/C0, 08014874/78, 08015C30/34, 080164D6/DE, 0801E440/48
+  - game logic the spec says to leave native: 08015AC2.., 0801D8E4..
+  - the mode-1 map's point test (08012D06..)
+- **Runtime read-watch:** the camera page was made slow-path, and reads were attributed to
+  generated functions through `addr2line`. This found only these readers:
+  - the layer, view and native camera code
+  - the cull functions above
+  - `0x08013C22`
+
+An overflow guard sits at `0x08006BFA`. While the widening is active, an emit is skipped
+when fewer than 16 shadow OAM entries are left. The shadow ends right before
+another global. In testing, at most 15 of the 128 entries were ever used.
+
+## Host validation
+
+These options apply to `platform/host/main.c`, and also through `tools/run_host.sh NAME F E <opts>`:
+
+| Option | Effect |
+|---|---|
+| `--ws` | writes 320x240 `frame_N.png` through `ppu_soft_render_view` |
+| `--ws-native` | also writes `native_N.png` |
+| `--ws-debug` | prints view stats and a BG seam check; give it twice for per-slot sprite classes and positions |
+| `--ws-off` | sets `ws_enabled = 0` |
+| `--ws-nodespawn` | keeps the native despawn bounds |
+| `--ws-force-decode` | ignores loaded chunk slots |
+| `--ws-decode-test` | decodes every chunk of every field resource and writes CRCs |
+
+Results:
+
+- **Native output:** with the hooks compiled in but no `--ws`, frames are pixel-identical to the build without hooks. That covered 30 intro frames and 923 gameplay frames (every 20 frames to frame 18460).
+- **Native view through `ppu_soft_render_view`** (`--ws --ws-off`): it is exactly the native frame at (40,40) with a black border, in all 184 frames compared.
+- **Decoder:** all 5249 chunk descriptors decode, and every one matches an independent Python decoder (`--ws-decode-test`).
+- **Seam check:** the authored map equals the hardware map on every native-screen cell, in every field frame checked.
+- **Forced decode:** forcing ROM decode instead of the loaded slots gives pixel-identical 320x240 frames over the 923-frame run.
+- **Game logic:**
+  - With render widening only (`--ws --ws-nodespawn`), the player position and
+    the camera trajectory match the native game on every frame of a
+    30,000-frame random-input run. Game RAM differs only in render state: the
+    shadow OAM, the sprite sort lists, the per-object sprite-frame decode
+    buffer at `0x0203B61C`/`0x030069E0`, and stale stack.
+  - With despawn widening (the default), outcomes can change. In the same run
+    a ki blast that the GBA would have despawned at the native edge flew on and
+    broke the tutorial boulder, which the native run left standing. That
+    triggered Gohan's "That was great!" dialogue, and the runs diverged from
+    frame 21461 on.
+  - A blast that leaves the native screen keeps flying through the margin, as intended.
+
+### Review run
+
+A fork-based input explorer (in `D:\dbz-n64\scratch\wsreview`, outside the
+repo) reached 16 field maps. They included:
+- the tutorial and its night version
+- Pepper Town (768x1024, with a rain wrap layer)
+- Goku's house rooms: 256x224, 240x272, 240x408 and 328x320 (narrow and short maps)
+- the 1024x1024 and 768x512 outdoor maps
+- the Frieza arena (240x256, with a wrap layer in the side margins)
+- the pink cloud map
+- the pause/status menu, the journal, the file select and the game-over flow
+
+Results over these runs:
+- **Seam check:** 0 bad cells in 5,274 field frames.
+- **Forced decode:** identical over 469 frames.
+- **Native view:** `--ws --ws-off` equals the native frame at (40,40) in 198 frames.
+- **Native game:** without `--ws`, game RAM is identical frame by frame to the
+  build before this change.
+- **Transitions:** the field-to-menu switch happens on black frames in both directions.
+
+## Limitations
+
+- **Coverage.** Not reached:
+  - battles with many enemies (only the Frieza boss fight)
+  - parallax (fx != 1.0) layers. ROM has about 20 of them, including static ones
+    (fx = 0), some only one chunk (256 px) wide. Outside the chunk grid their
+    margins are blank, so a static backdrop would not reach the view edges.
+  - the mode-1 world map
+  - beam attacks that use the `0x08014894` emitter (the fix is verified only by code)
+- **Sprite classes.** Sprite classes that never appeared in testing are classified statically:
+  - Unknown classes count as world. A HUD element of an unknown class stays at its
+    native place and is not anchored.
+  - A world-anchored object of a screen-space class would be moved by up to 40 px.
+  - The tables in `widescreen.c` are the place to fix either case.
+- **Emitters without the pack idiom** fall back to the window decode:
+  - In testing that was only the banner, the HUD strip x, and constants.
+  - A world sprite taller than 16 px that sits partly above the view top could then be placed 256 px too low.
+- **Despawn widening is a gameplay change by design.** Projectiles can hit targets in the margin.
+  - `ws_widen_despawn = 0` restores the native behaviour.
+  - The other camera tests that look like game logic stay native: `0x08015AC0`, `0x0801D8E2`, `0x08012D04`.
+- **Scripted entrances.** NPCs that wait just off the native screen are visible in the margin.
+  For example, Androids 17 and 18 stand at the top of the view in the Pepper Town cutscene
+  before they enter.
+- **N64 renderer cache.** `platform/n64/render` re-queries `bg_entry` for a cell only when the
+  cell enters the window or its hardware map cell changes (see `render_bg.c`). Hook data
+  can change without either:
+  - a map swap while the field present keeps running
+  - a change of the blank tile
+  - a runtime edit of a loaded chunk that is outside the ring
+
+  In these cases the N64 platform must call `gba_render_invalidate_bg()`. A map change
+  (`View+0x50`) is the obvious trigger. `ppu_soft` queries every cell of every frame and
+  is not affected.
+- **Windows (WIN0/WIN1)** are never used by this game. `ppu_soft` extends a window to the
+  margins only when it spans the whole native width or height.
+- **The mode-1 map** (affine BG2 with HBlank matrices) stays native.

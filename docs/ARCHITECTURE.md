@@ -131,6 +131,7 @@ IRQ handler's DMA register writes, which use a register-relative address.
 - Sprite coordinates come out of the sprite builder as full signed values.
 - HUD objects are re-anchored to the screen edges.
 - Other screens show the native 240×160 frame centred.
+- Details, verification and limitations: `docs/WIDESCREEN.md`.
 
 **Controls:**
 

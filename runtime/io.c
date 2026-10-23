@@ -16,6 +16,7 @@
 #include <string.h>
 #include <setjmp.h>
 #include "io.h"
+#include "widescreen.h"
 
 #define IRQ_TABLE   0x03000E3Cu
 #define IRQ_FLAGS   0x03000E74u
@@ -393,6 +394,7 @@ static void run_next_event(void) {
             for (int l = 0; l < 160; l++)
                 if (line_stamp[l] != render_seq)
                     snapshot_line(l);
+        ws_frame_begin();            /* 320x240 field view state for this frame */
         plat_frame();
         render_seq++;
         gba_line_regs_valid = 0;
