@@ -334,6 +334,39 @@ addr = 0x030007FC
 mode = "arm"
 func = "native_memcpy16"
 
+# The other IWRAM copy and fill routines (native.c in this directory):
+# memcpy32, memset32 and memset16 do the game's VRAM, palette and OAM
+# uploads and most of its RAM copies.
+[[native]]
+addr = 0x03000768
+mode = "arm"
+func = "native_memcpy32"
+
+[[native]]
+addr = 0x030007A8
+mode = "arm"
+func = "native_memset32"
+
+[[native]]
+addr = 0x03000858
+mode = "arm"
+func = "native_memset16"
+
+# field-layer tilemap rebuild: 64 memcpy16 row copies per layer and frame
+# that mostly rewrite the same map (LoG2's 0x080054A4 with memcpy16 in place
+# of DMA3); only rows that change are written, so VRAM stays clean
+[[native]]
+addr = 0x08007D98
+mode = "thumb"
+func = "native_field_map_stream"
+
+# strided 8x8 tile gather out of decoded sprite bitmaps: LoG2's 0x03000480
+# with the stride field at +0x28 instead of +0x2C (runtime/native.c)
+[[native]]
+addr = 0x030004C0
+mode = "arm"
+func = "native_tile_gather_s28"
+
 # Hot hand-written routines replaced by native C (runtime/native.c): both are
 # byte-identical to LoG2's 0x03000520 / 0x03000704.
 [[native]]
