@@ -248,6 +248,43 @@ static void write_save(void) {
 /* ------------------------------------------------------------ hooks */
 
 static uint16_t fb[240 * 160];
+
+/* --dump-state F,F,..: write the video state (IO, palette, VRAM, OAM and the
+ * per-line register snapshots) as GBA little-endian bytes, for renderer
+ * tests.  Layout: "GBAS" u32 version=1, io[0x400], pal[0x400],
+ * vram[0x18000], oam[0x400], u32 line_regs_valid, line_regs[160] (packed
+ * little-endian: pa,pb,pc,pd u16; x,y u32; hofs[4],vofs[4] u16). */
+static int dumps[256], ndumps;
+
+static void put_mem(FILE *f, const uint32_t *words, uint32_t bytes) {
+    for (uint32_t i = 0; i < bytes; i++)
+        fputc(((const uint8_t *)words)[i ^ GBA_BX], f);
+}
+
+static void put_le(FILE *f, uint32_t v, int n) {
+    for (int i = 0; i < n; i++)
+        fputc((v >> (8 * i)) & 0xFF, f);
+}
+
+static void dump_state(const char *path) {
+    FILE *f = fopen(path, "wb");
+    if (!f) { perror(path); return; }
+    fwrite("GBAS", 1, 4, f);
+    put_le(f, 1, 4);
+    put_mem(f, gba_mem.io, 0x400);
+    put_mem(f, gba_mem.pal, 0x400);
+    put_mem(f, gba_mem.vram, 0x18000);
+    put_mem(f, gba_mem.oam, 0x400);
+    put_le(f, (uint32_t)gba_line_regs_valid, 4);
+    for (int l = 0; l < 160; l++) {
+        const gba_line_regs_t *s = &gba_line_regs[l];
+        put_le(f, s->bg2pa, 2); put_le(f, s->bg2pb, 2); put_le(f, s->bg2pc, 2); put_le(f, s->bg2pd, 2);
+        put_le(f, s->bg2x, 4); put_le(f, s->bg2y, 4);
+        for (int i = 0; i < 4; i++) put_le(f, s->hofs[i], 2);
+        for (int i = 0; i < 4; i++) put_le(f, s->vofs[i], 2);
+    }
+    fclose(f);
+}
 static volatile int frames_since_alarm;
 static time_t t_start;
 
@@ -283,6 +320,13 @@ void plat_frame(void) {
     int want = every && frame % every == 0;
     for (int i = 0; i < nshots; i++)
         if (shots[i] == frame) want = 1;
+    for (int i = 0; i < ndumps; i++)
+        if (dumps[i] == frame) {
+            char path[512];
+            snprintf(path, sizeof path, "%s/state_%05d.bin", outdir, frame);
+            dump_state(path);
+            want = 1;
+        }
     if (want) {
         char path[512];
         ppu_soft_render(fb, 240);
@@ -344,6 +388,13 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--save")) { save_path = v; i++; }
         else if (!strcmp(a, "--wav")) { wav_path = v; i++; }
         else if (!strcmp(a, "--rom-profile")) { rom_profile = 1; }
+        else if (!strcmp(a, "--dump-state")) {
+            char *dup = strdup(v), *sv = NULL;
+            for (char *t = strtok_r(dup, ",", &sv); t && ndumps < 256; t = strtok_r(NULL, ",", &sv))
+                dumps[ndumps++] = atoi(t);
+            free(dup);
+            i++;
+        }
         else if (!strcmp(a, "--shot")) {
             char *dup = strdup(v), *sv = NULL;
             for (char *t = strtok_r(dup, ",", &sv); t && nshots < 256; t = strtok_r(NULL, ",", &sv))

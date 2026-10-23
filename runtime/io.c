@@ -113,6 +113,8 @@ static void dma_transfer(int ch) {
         s &= ~1u;
         t &= ~1u;
     }
+    if (dinc > 0)
+        gba_mem_touch(t, span + sz);
     uint8_t *hs = gba_host_ptr(s), *ht = gba_host_wptr(t);
     int fast = hs && ht && dinc > 0 && sinc >= 0 &&
                (uint8_t *)gba_host_ptr(s + (sinc ? span : 0)) == hs + (sinc ? span : 0) &&

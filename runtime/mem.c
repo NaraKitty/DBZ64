@@ -54,7 +54,55 @@ void gba_mem_init(void) {
         gba_rd_page[(a >> 12) & 0xFFFF] = p;
         gba_wr_page[(a >> 12) & 0xFFFF] = p;
     }
+    /* invariant: a page's dirty bit is set exactly when it is writable;
+     * everything starts dirty, gba_vram_take_dirty() re-protects */
+    gba_vram_dirty = 0xFFFFFF;
     gba_rom_map_init();
+}
+
+/* ------------------------------------------------------------ VRAM dirty */
+
+volatile uint32_t gba_vram_dirty;
+
+static void vram_set_protect(uint32_t page, int protect) {
+    /* page 0..23 is mapped at every 128KB mirror; pages 16..23 also appear
+     * at offsets 0x18000..0x1FFFF of each mirror */
+    for (uint32_t base = 0x06000; base < 0x07000; base += 0x20) {
+        uint32_t idx[2] = { base + page, page >= 16 ? base + page + 8 : 0 };
+        for (int k = 0; k < 2; k++) {
+            if (!idx[k])
+                continue;
+            uintptr_t p = gba_wr_page[idx[k]] & ~(uintptr_t)GBA_PAGE_SLOW;
+            gba_wr_page[idx[k]] = protect ? (p | GBA_PAGE_SLOW) : p;
+        }
+    }
+}
+
+static inline void vram_mark(uint32_t a) {
+    uint32_t off = a & 0x1FFFF;
+    if (off >= 0x18000)
+        off -= 0x8000;
+    uint32_t page = off >> 12;
+    if (!(gba_vram_dirty & (1u << page))) {
+        gba_vram_dirty |= 1u << page;
+        vram_set_protect(page, 0);
+    }
+}
+
+uint32_t gba_vram_take_dirty(void) {
+    uint32_t d = gba_vram_dirty;
+    gba_vram_dirty = 0;
+    for (uint32_t page = 0; page < 24; page++)
+        if (d & (1u << page))
+            vram_set_protect(page, 1);
+    return d;
+}
+
+void gba_mem_touch(uint32_t a, uint32_t len) {
+    if ((a >> 24) != 0x06 || !len)
+        return;
+    for (uint32_t p = a & ~0xFFFu; p < a + len; p += 0x1000)
+        vram_mark(p);
 }
 
 /* ------------------------------------------------------------ slow paths */
@@ -144,6 +192,10 @@ void gba_wr32_slow(uint32_t a, uint32_t v) {
     case 0x05:
         gba_mem.pal[(a & 0x3FC) >> 2] = v;
         return;
+    case 0x06:
+        vram_mark(a);
+        wr32(a, v);
+        return;
     case 0x07:
         gba_mem.oam[(a & 0x3FC) >> 2] = v;
         return;
@@ -161,6 +213,10 @@ void gba_wr16_slow(uint32_t a, uint32_t v) {
         return;
     case 0x05:
         *(uint16_t *)((uint8_t *)gba_mem.pal + ((a & 0x3FE) ^ GBA_HX)) = (uint16_t)v;
+        return;
+    case 0x06:
+        vram_mark(a);
+        wr16(a, v);
         return;
     case 0x07:
         *(uint16_t *)((uint8_t *)gba_mem.oam + ((a & 0x3FE) ^ GBA_HX)) = (uint16_t)v;
@@ -184,8 +240,10 @@ void gba_wr8_slow(uint32_t a, uint32_t v) {
         gba_wr16_slow(a, v | (v << 8));
         return;
     case 0x06:
-        /* handled by the fast path for BG VRAM; OBJ VRAM byte writes are
-         * ignored on hardware, the fast path stores them (harmless) */
+        /* BG VRAM: the byte is written to both halves of the halfword;
+         * OBJ VRAM (0x10000+ in modes 0-2) ignores byte writes */
+        if ((a & 0x1FFFF) < 0x10000)
+            gba_wr16_slow(a & ~1u, v | (v << 8));
         return;
     case 0x07:
         return;  /* ignored by hardware */

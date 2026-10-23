@@ -69,6 +69,14 @@ void gba_wr32_slow(uint32_t a, uint32_t v);
 void gba_wr16_slow(uint32_t a, uint32_t v);
 void gba_wr8_slow(uint32_t a, uint32_t v);
 
+/* VRAM write tracking for renderer caches: bit n = 4KB VRAM page n (0..23)
+ * was written since the last gba_vram_take_dirty().  Pages are write-
+ * protected until their first write in a frame. */
+extern volatile uint32_t gba_vram_dirty;
+uint32_t gba_vram_take_dirty(void);
+/* mark [a, a+len) dirty and writable (bulk writers like DMA call this first) */
+void gba_mem_touch(uint32_t a, uint32_t len);
+
 /* host pointer for a guest address in a fast page, or NULL */
 static inline void *gba_host_ptr(uint32_t a) {
     uintptr_t p = gba_rd_page[(a >> 12) & 0xFFFFu];
