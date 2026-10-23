@@ -906,10 +906,16 @@ def main():
     # Address-taken functions are the possible targets of indirect calls.  The
     # IRQ code is only entered by the runtime (with a full context save), so it
     # does not constrain the indirect-call summary (game.toml [recomp]).
+    # Entries seeded as computed-jump targets inside a function (toml
+    # [[extra_func]] resume = true) are not called indirectly either, and
+    # neither is code only gap fill found: no BL, pointer, vtable or code
+    # constant anywhere refers to it (dead code, or data that decodes as code
+    # and falls into a real function).
     runtime_only = set(cfg.get('recomp', {}).get('runtime_only', []))
+    not_taken = ('call', 'tail', 'reset', 'toml-resume', 'gap-fill', 'gap-fill-arm', None)
     taken = set()
     for f in funcs:
-        if f.get('origin') not in ('call', 'tail', 'reset', None) and f['addr'] not in runtime_only:
+        if f.get('origin') not in not_taken and f['addr'] not in runtime_only:
             taken.add((f['addr'], f['thumb']))
     noreturn = {(e['addr'], e.get('mode', 'thumb') == 'thumb') for e in cfg.get('noreturn', [])}
     for e in cfg.get('override_load', []):

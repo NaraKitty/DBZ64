@@ -78,6 +78,7 @@ def load_toml(path):
       funcs:  [(addr, thumb, source_addr|None, resume, note)]
       tables: [(addr, stride, count, fmt, entries_mode, name)]
       copies: [(runtime_start, source_start, size, name)]
+      false:  [(addr, thumb, note)] ([[false_entry]]: never a function entry)
       program: the [program] table
     """
     t = tomllib.load(open(path, 'rb'))
@@ -93,7 +94,9 @@ def load_toml(path):
     copies = []
     for e in t.get('code_copy', []):
         copies.append((e['runtime_start'], e['source_start'], e['size'], e.get('name', '')))
-    return {'funcs': funcs, 'tables': tables, 'copies': copies,
+    false = [(e['addr'], e.get('mode', 'thumb') == 'thumb', e.get('note', ''))
+             for e in t.get('false_entry', [])]
+    return {'funcs': funcs, 'tables': tables, 'copies': copies, 'false': false,
             'program': t.get('program', {})}
 
 
@@ -710,7 +713,7 @@ def load_layout(path):
 
 
 STATIC_DATA_RANGES = RODATA = IWRAM_CODE = TEXT2 = None
-# ldr ip,[pc,#8]; sub r0,r0,#n; add ip,pc,ip; bx ip; .word rel
+# ldr ip,[pc,#8]; sub r0,r0,#n (or sub r1,r1,#n); add ip,pc,ip; bx ip; .word rel
 THUNK_W0, THUNK_W2, THUNK_W3 = 0xE59FC008, 0xE08FC00C, 0xE12FFF1C
 
 
@@ -738,6 +741,10 @@ class Driver:
         self.verbose = verbose
         self.known_bases = set()
         self.blacklist = {}          # (addr, thumb) -> reason
+        for addr, th, note in self.T['false']:
+            # e.g. a data word that happens to point into the middle of a
+            # function the pointer harvest cannot tell from an entry
+            self.blacklist[(addr, th)] = 'toml false_entry: ' + note
         self.history = []
 
     # ------------------------------------------------ setup
@@ -920,7 +927,9 @@ class Driver:
             if an.cs.u32(a) != THUNK_W0:
                 continue
             w1, w2, w3 = an.cs.u32(a + 4), an.cs.u32(a + 8), an.cs.u32(a + 12)
-            if w2 == THUNK_W2 and w3 == THUNK_W3 and (w1 & 0xFFFFF000) == 0xE2400000:
+            # sub r0,r0,#n (this in r0) or sub r1,r1,#n (struct-returning
+            # methods: this in r1)
+            if w2 == THUNK_W2 and w3 == THUNK_W3 and (w1 & 0xFFFFF000) in (0xE2400000, 0xE2411000):
                 rel = an.cs.u32(a + 16)
                 tgt = (a + 16 + rel) & 0xffffffff
                 adj = ror32_imm(w1 & 0xfff)
@@ -1056,16 +1065,20 @@ class Driver:
         bad = {}
         # weak pointer-derived entries that turned out to sit inside a body
         # walked from an earlier, independent entry are coincidental words
+        # (a literal in code outranks gap fill, though: data that decodes as
+        # code may run into a real function)
         insn_owner = defaultdict(set)
         for key, f in an.funcs.items():
             for a in f.insns:
                 if a != key[0]:
                     insn_owner[(a, key[1])].add(key)
         for key, f in an.funcs.items():
-            if an.entries.get(key) not in ('rom-ptr', 'code-const'):
+            origin = an.entries.get(key)
+            if origin not in ('rom-ptr', 'code-const'):
                 continue
+            weaker = ('rom-ptr', 'code-const') + (('gap-fill', 'gap-fill-arm') if origin == 'code-const' else ())
             outer = [o for o in insn_owner.get(key, ()) if o[0] < key[0] and
-                     an.entries.get(o) not in ('rom-ptr', 'code-const')]
+                     an.entries.get(o) not in weaker]
             if outer:
                 bad[key] = (key[0], set(outer))
         for key, f in an.funcs.items():
