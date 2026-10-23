@@ -117,6 +117,11 @@ static inline int32_t rd16s(uint32_t a) { return *(volatile const int16_t *)(GBA
 static inline void wr32(uint32_t a, uint32_t v) { *(volatile uint32_t *)GBA_GA(a) = v; }
 static inline void wr16(uint32_t a, uint32_t v) { *(volatile uint16_t *)(GBA_GA(a) ^ GBA_HX) = (uint16_t)v; }
 static inline void wr8(uint32_t a, uint32_t v) { *(volatile uint8_t *)(GBA_GA(a) ^ GBA_BX) = (uint8_t)v; }
+/* word access at base + small positive offset: masking the base alone lets
+ * the offset fold into the load/store and the mask be shared between the
+ * fields of one struct (a valid base is never within 4KB of 0x10000000) */
+static inline uint32_t rd32o(uint32_t b, uint32_t off) { return *(volatile const uint32_t *)(GBA_GA(b) + off); }
+static inline void wr32o(uint32_t b, uint32_t off, uint32_t v) { *(volatile uint32_t *)(GBA_GA(b) + off) = v; }
 #else
 /* ARM7 semantics: unaligned LDR rotates, unaligned LDRH rotates by 8,
  * unaligned stores ignore the low bits.  The slow path handles all of it. */
@@ -173,6 +178,8 @@ static inline void wr8(uint32_t a, uint32_t v) {
     }
     *(uint8_t *)(p + ((a & 0xFFFu) ^ GBA_BX)) = (uint8_t)v;
 }
+static inline uint32_t rd32o(uint32_t b, uint32_t off) { return rd32(b + off); }
+static inline void wr32o(uint32_t b, uint32_t off, uint32_t v) { wr32(b + off, v); }
 
 #endif
 

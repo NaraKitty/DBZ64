@@ -25,6 +25,7 @@
 #include "rom.h"
 #include "rom_n64.h"
 #include "tlb.h"
+#include "prof.h"
 #include "ppu_soft.h"
 
 void gba_boot(void);
@@ -55,6 +56,7 @@ typedef struct { int from, to; uint16_t keys; } keyspan_t;
 static struct {
     int active;
     int nodraw;          /* skip drawing except on shot frames (fast runs) */
+    int profile_from;    /* start the sampling profiler at this frame */
     int frames;
     int shots[64], nshots;
     keyspan_t spans[256];
@@ -93,6 +95,8 @@ static void load_test_script(void) {
             test.frames = a;
         } else if (!strncmp(line, "nodraw", 6)) {
             test.nodraw = 1;
+        } else if (sscanf(line, "profile %d", &a) == 1) {
+            test.profile_from = a;
         } else if (sscanf(line, "shot %d", &a) == 1) {
             if (test.nshots < 64)
                 test.shots[test.nshots++] = a;
@@ -340,7 +344,10 @@ void plat_frame(void) {
         t_last = now;
     }
 
+    if (test.active && test.profile_from == frame)
+        prof_start(500);
     if (test.active && frame >= test.frames) {
+        prof_report();
         debugf("test done at frame %d\n", frame);
         emux_ioctl_exit();
         for (;;) { }

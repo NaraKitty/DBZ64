@@ -214,6 +214,10 @@ int tlb_trace = 64;   /* log the first faults (debugging aid) */
 static void tlb_exception(exception_t *ex) {
     reg_block_t *r = ex->regs;
     uint32_t va = (uint32_t)C0_BADVADDR();
+    /* rd32o/wr32o add the offset after masking: a junk base just below
+     * 0x10000000 lands in the first 4KB above it; wrap like the GBA bus */
+    if (va >= 0x10000000u && va < 0x10001000u && va != (uint32_t)r->epc)
+        va &= 0x0FFFFFFFu;
     if (tlb_trace > 0) {
         tlb_trace--;
         uint32_t at = (uint32_t)r->epc + ((r->cr & C0_CAUSE_BD) ? 4 : 0);

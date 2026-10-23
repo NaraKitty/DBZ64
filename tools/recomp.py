@@ -572,7 +572,10 @@ class FuncGen:
             if on_stack:
                 ld = 'sp_rd32(%s)' % addr_e
             elif size == 4:
-                ld = 'rd32(%s)' % addr_e
+                if i.pre and i.up and off_expr is None and 0 < offv < 0x1000:
+                    ld = 'rd32o(%s, %du)' % (base_e, offv)
+                else:
+                    ld = 'rd32(%s)' % addr_e
             elif size == 2:
                 ld = 'rd16s(%s)' % addr_e if i.signed else 'rd16(%s)' % addr_e
             else:
@@ -597,7 +600,10 @@ class FuncGen:
         elif on_stack:
             st = 'sp_wr32(%s, %s);' % (addr_e, val)
         else:
-            st = {4: 'wr32', 2: 'wr16', 1: 'wr8'}[size] + '(%s, %s);' % (addr_e, val)
+            if size == 4 and i.pre and i.up and off_expr is None and 0 < offv < 0x1000:
+                st = 'wr32o(%s, %du, %s);' % (base_e, offv, val)
+            else:
+                st = {4: 'wr32', 2: 'wr16', 1: 'wr8'}[size] + '(%s, %s);' % (addr_e, val)
         out.append(st)
         if i.wb and i.rn != 15:
             out.append('r%d = %s;' % (i.rn, ea))
