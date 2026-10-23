@@ -39,6 +39,28 @@ Makefile and the run scripts; `tools/recomp.py --game NAME` and
 `tools/mkrom.py --game NAME` read the same directory. Builds of different
 games need different output directories.
 
+### Buu's Fury (`games/buu/`)
+The same engine with about twice LoG2's code: 4435 functions and 142k guest
+instructions (3.3 MB of MIPS), plus Nintendo's link-cable and wireless
+adapter libraries and ARM soft-float code. What differs from LoG2:
+- Section layout and IWRAM image (ROM 0x087B79A4, 0x1004 bytes; only the
+  code part, up to 0x03000F44, is declared to the recompiler).
+- The IRQ dispatcher (0x03000B6C) tests Serial and Timer3 right after DMA2.
+- EEPROM library V124 (64 Kbit, as LoG2); SWI 0x0B CpuSet in the link
+  libraries; the IWRAM routines memcpy32/memset32/memcpy16/memset16 replace
+  most DMA3 copies (memcpy16 is a Duff's device whose computed-jump targets
+  are seeded in game.toml).
+- The sound engine, mixer and FIFO model are LoG2's (`native_mix_voice` and
+  `native_clip` apply unchanged).
+- No 320×240 field view yet: `games/buu/widescreen.c` always gives the
+  native view.
+
+Status: the host build plays from power-on through the logos, title, a new
+game and the story intro into gameplay with no dispatch misses, matching the
+interpreter (RAM identical at every checked VBlank outside the dead stack)
+and the mGBA oracle's audio. The N64 build (CPU renderer) runs the same
+script in ares with frames identical to the host's.
+
 ### Code discovery (`tools/analyze.py`)
 For LoG2 (`games/log2/game.toml`):
 - Recursive descent from crt0, AgbMain (0x08000158) and the constructor table
