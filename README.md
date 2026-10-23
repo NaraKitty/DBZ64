@@ -86,13 +86,17 @@ Then:
    python3 tools/recomp.py baserom.gba gen/analysis/functions.json gen/c 24 --game log2
    ```
 
-3. **Build the N64 ROM**, which writes `platform/n64/dbz.z64`:
+3. **Build the N64 ROM** from a build directory outside the repository.
+   `dbz.z64` is written to the current directory:
 
    ```bash
-   make -C platform/n64 GAME=log2 GEN=$PWD/gen/c BASEROM=$PWD/baserom.gba
+   mkdir -p ../n64build && cd ../n64build
+   make -f ~/dbzn64/platform/n64/Makefile GAME=log2 BUILD_DIR=$PWD \
+        GEN=$OLDPWD/gen/c BASEROM=$OLDPWD/baserom.gba
    ```
 
-   The ROM contains your GBA dump, so don't share it. From Git Bash on
+   The ROM contains your GBA dump, so don't share it, and keep it out of
+   synced folders. From Git Bash on
    Windows, `tools/build_release.sh OUT.z64` runs the same build through
    WSL. It also removes any leftover test script, which would otherwise
    boot the ROM in test mode.

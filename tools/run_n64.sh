@@ -26,7 +26,8 @@ BD="${BD:-n64t}"
 WSLREPO="${WSLREPO:-/home/nara/dbzn64}"
 mkdir -p "$RUN" /d/dbz-n64/build/$BD/filesystem
 cp "$SCRIPT" /d/dbz-n64/build/$BD/filesystem/test.txt
-MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu -- bash -c "export N64_INST=/opt/libdragon; cd $WSLREPO/platform/n64 && touch /mnt/d/dbz-n64/build/$BD/filesystem/test.txt && make -j12 REPO=$WSLREPO GAME=$GAME GEN=$GENDIR BUILD_DIR=/mnt/d/dbz-n64/build/$BD $* > /mnt/d/dbz-n64/build/n64_make_$BD.log 2>&1 || { grep -E 'error' /mnt/d/dbz-n64/build/n64_make_$BD.log | head; exit 1; }; cp dbz.z64 /mnt/d/dbz-n64/build/$BD/dbz_test.z64"
+# make runs in the build directory, which receives dbz.z64 (never the repo)
+MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu -- bash -c "export N64_INST=/opt/libdragon; cd /mnt/d/dbz-n64/build/$BD && touch filesystem/test.txt && make -f $WSLREPO/platform/n64/Makefile -j12 REPO=$WSLREPO GAME=$GAME GEN=$GENDIR BUILD_DIR=/mnt/d/dbz-n64/build/$BD $* > /mnt/d/dbz-n64/build/n64_make_$BD.log 2>&1 || { grep -E 'error' /mnt/d/dbz-n64/build/n64_make_$BD.log | head; exit 1; }; cp dbz.z64 dbz_test.z64"
 rm -f /d/dbz-n64/build/$BD/filesystem/test.txt
 cd "/d/Games/ARES N64 EMULATOR"
 ./ares.exe --settings-file 'D:\dbz-n64\scratch\n64platform\ares_settings.bml' \

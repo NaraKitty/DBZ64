@@ -21,6 +21,7 @@ B="/d/dbz-n64/build/$BD"
 mkdir -p "$B/filesystem"
 # a test script left in the filesystem would put the ROM in test mode
 rm -f "$B"/filesystem/*.txt "$B/dbz.dfs"
-MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu -- bash -c "export N64_INST=/opt/libdragon; cd $WSLREPO/platform/n64 && make -j12 REPO=$WSLREPO GAME=$GAME GEN=$GENDIR BUILD_DIR=/mnt/d/dbz-n64/build/$BD $* > /mnt/d/dbz-n64/build/n64_make_$BD.log 2>&1 || { grep -E 'error' /mnt/d/dbz-n64/build/n64_make_$BD.log | head; exit 1; }; cp dbz.z64 /mnt/d/dbz-n64/build/$BD/dbz.z64"
+# make runs in the build directory, which receives dbz.z64 (never the repo)
+MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu -- bash -c "export N64_INST=/opt/libdragon; cd /mnt/d/dbz-n64/build/$BD && make -f $WSLREPO/platform/n64/Makefile -j12 REPO=$WSLREPO GAME=$GAME GEN=$GENDIR BUILD_DIR=/mnt/d/dbz-n64/build/$BD $* > /mnt/d/dbz-n64/build/n64_make_$BD.log 2>&1 || { grep -E 'error' /mnt/d/dbz-n64/build/n64_make_$BD.log | head; exit 1; }"
 cp "$B/dbz.z64" "$OUT"
 ls -l "$OUT"

@@ -1,8 +1,11 @@
-# N64 build (run in WSL with N64_INST=/opt/libdragon):
-#   make -C platform/n64 [GAME=log2|buu] BASEROM=/mnt/d/dbz-n64/rom/baserom.gba
+# N64 build (run in WSL with N64_INST=/opt/libdragon), from the build
+# directory, which receives dbz.z64:
+#   cd BUILD_DIR && make -f ~/dbzn64/platform/n64/Makefile [GAME=log2|buu] \
+#       BUILD_DIR=$PWD BASEROM=/mnt/d/dbz-n64/rom/baserom.gba
 # GAME picks games/$(GAME) (game.h, game sources); default log2.
 # Generated code comes from tools/recomp.py (GEN), build output goes to
-# BUILD_DIR; neither is in the repository.
+# BUILD_DIR; neither is in the repository.  dbz.z64 embeds the GBA ROM:
+# never build it inside the (synced) repository directory.
 # make cannot handle spaces in paths; the repo lives under "DBZ LoG2 N64", so
 # build through a space-free symlink (ln -s ".../DBZ LoG2 N64" ~/dbzn64)
 REPO      ?= $(HOME)/dbzn64
@@ -19,6 +22,10 @@ endif
 GAME_DIR  := $(REPO)/games/$(GAME)
 ifeq ($(wildcard $(GAME_DIR)/game.h),)
 $(error unknown GAME '$(GAME)': no $(GAME_DIR)/game.h)
+endif
+# dbz.z64 (with the GBA ROM inside) is written to the current directory
+ifeq ($(shell case "$$(pwd -P)/" in ("$$(cd '$(REPO)' && pwd -P)/"*) echo inside;; esac),inside)
+$(error run make from a build directory outside the repository (make -f .../platform/n64/Makefile): dbz.z64 contains the GBA ROM)
 endif
 SOURCE_DIR := $(REPO)
 N64_MKDFS_ROOT := $(BUILD_DIR)/filesystem
