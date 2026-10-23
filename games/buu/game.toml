@@ -345,3 +345,746 @@ func = "native_mix_voice"
 addr = 0x03000A4C
 mode = "arm"
 func = "native_clip"
+
+# ---------------------------------------------------------------- 320x240 view
+# widescreen.c (this directory), docs/WIDESCREEN.md.  Generated and checked by
+# disassembly: every override PC is the LDR of the camera-rect field (or the
+# ROM screen-rect field) its function name says.  Camera rect at 0x030019BC:
+# L, T, R=L+240, B=T+160 (camera 0x030019A4 +0x18..+0x24).
+
+# Render culling (isVisible, vtable +0xC): all four sides widen to the view.
+# isVisible 08019BF4 actors and projectiles, 17 vtables (LoG2 0x08013C8E); 0x08019C22/26 compute the screen position
+[[override_load]]
+pc = 0x08019C06
+func = "ws_cull_left"
+[[override_load]]
+pc = 0x08019C16
+func = "ws_cull_top"
+[[override_load]]
+pc = 0x08019BFE
+func = "ws_cull_right"
+[[override_load]]
+pc = 0x08019C10
+func = "ws_cull_bottom"
+# isVisible 0800CF42 static sprites (LoG2 0x080071FA)
+[[override_load]]
+pc = 0x0800CF5A
+func = "ws_cull_left"
+[[override_load]]
+pc = 0x0800CF6A
+func = "ws_cull_top"
+[[override_load]]
+pc = 0x0800CF54
+func = "ws_cull_right"
+[[override_load]]
+pc = 0x0800CF64
+func = "ws_cull_bottom"
+# isVisible 0800DA3E (LoG2 0x0800FD3E)
+[[override_load]]
+pc = 0x0800DA6E
+func = "ws_cull_left"
+[[override_load]]
+pc = 0x0800DA7E
+func = "ws_cull_top"
+[[override_load]]
+pc = 0x0800DA68
+func = "ws_cull_right"
+[[override_load]]
+pc = 0x0800DA78
+func = "ws_cull_bottom"
+# isVisible 0802A904 (LoG2 0x080136A6); 0x0802A90E/16 compute the screen position
+[[override_load]]
+pc = 0x0802A92C
+func = "ws_cull_left"
+[[override_load]]
+pc = 0x0802A93C
+func = "ws_cull_top"
+[[override_load]]
+pc = 0x0802A926
+func = "ws_cull_right"
+[[override_load]]
+pc = 0x0802A936
+func = "ws_cull_bottom"
+# isVisible 0801003A actors, 12 vtables: anchor point test (3D maps only)
+[[override_load]]
+pc = 0x08010074
+func = "ws_cull_left"
+[[override_load]]
+pc = 0x08010084
+func = "ws_cull_top"
+[[override_load]]
+pc = 0x0801007C
+func = "ws_cull_right"
+[[override_load]]
+pc = 0x0801008C
+func = "ws_cull_bottom"
+# isVisible 0801003A actors: main meta-sprite box
+[[override_load]]
+pc = 0x08010216
+func = "ws_cull_left"
+[[override_load]]
+pc = 0x08010222
+func = "ws_cull_top"
+[[override_load]]
+pc = 0x08010210
+func = "ws_cull_right"
+[[override_load]]
+pc = 0x0801021C
+func = "ws_cull_bottom"
+# isVisible 0801003A actors: auxiliary piece box
+[[override_load]]
+pc = 0x0801029C
+func = "ws_cull_left"
+[[override_load]]
+pc = 0x080102A8
+func = "ws_cull_top"
+[[override_load]]
+pc = 0x08010292
+func = "ws_cull_right"
+[[override_load]]
+pc = 0x080102A2
+func = "ws_cull_bottom"
+# isVisible 0800AC64
+[[override_load]]
+pc = 0x0800AC8C
+func = "ws_cull_left"
+[[override_load]]
+pc = 0x0800AC9C
+func = "ws_cull_top"
+[[override_load]]
+pc = 0x0800AC96
+func = "ws_cull_right"
+[[override_load]]
+pc = 0x0800ACA6
+func = "ws_cull_bottom"
+# isVisible 0800CBA8 point test
+[[override_load]]
+pc = 0x0800CBC0
+func = "ws_cull_left"
+[[override_load]]
+pc = 0x0800CBCE
+func = "ws_cull_top"
+[[override_load]]
+pc = 0x0800CBC6
+func = "ws_cull_right"
+[[override_load]]
+pc = 0x0800CBD4
+func = "ws_cull_bottom"
+# isVisible 0800D538
+[[override_load]]
+pc = 0x0800D6B0
+func = "ws_cull_left"
+[[override_load]]
+pc = 0x0800D6C0
+func = "ws_cull_top"
+[[override_load]]
+pc = 0x0800D6AA
+func = "ws_cull_right"
+[[override_load]]
+pc = 0x0800D6BA
+func = "ws_cull_bottom"
+# isVisible 0801809E
+[[override_load]]
+pc = 0x08018244
+func = "ws_cull_left"
+[[override_load]]
+pc = 0x08018254
+func = "ws_cull_top"
+[[override_load]]
+pc = 0x0801823E
+func = "ws_cull_right"
+[[override_load]]
+pc = 0x0801824E
+func = "ws_cull_bottom"
+# isVisible 08036B9C 0x08036BBC/C4 compute the screen position
+[[override_load]]
+pc = 0x08036BD6
+func = "ws_cull_left"
+[[override_load]]
+pc = 0x08036BE6
+func = "ws_cull_top"
+[[override_load]]
+pc = 0x08036BD0
+func = "ws_cull_right"
+[[override_load]]
+pc = 0x08036BE0
+func = "ws_cull_bottom"
+
+# Off-screen despawn tests (vtable +0x28, outside the camera -> remove):
+# widened too, so objects do not vanish inside the visible margin
+# (ws_widen_despawn).
+# despawn test 08019B7C directional projectiles (LoG2 0x08013C22)
+[[override_load]]
+pc = 0x08019BCE
+func = "ws_despawn_left"
+[[override_load]]
+pc = 0x08019BBE
+func = "ws_despawn_top"
+[[override_load]]
+pc = 0x08019BA2
+func = "ws_despawn_right"
+[[override_load]]
+pc = 0x08019BAE
+func = "ws_despawn_bottom"
+# despawn test 0802C7EA (LoG2 0x0801A10A)
+[[override_load]]
+pc = 0x0802C828
+func = "ws_despawn_left"
+[[override_load]]
+pc = 0x0802C838
+func = "ws_despawn_top"
+[[override_load]]
+pc = 0x0802C832
+func = "ws_despawn_right"
+[[override_load]]
+pc = 0x0802C842
+func = "ws_despawn_bottom"
+# despawn test 08035A80 (LoG2 0x08016190)
+[[override_load]]
+pc = 0x08035AA8
+func = "ws_despawn_left"
+[[override_load]]
+pc = 0x08035AB8
+func = "ws_despawn_top"
+[[override_load]]
+pc = 0x08035AB2
+func = "ws_despawn_right"
+[[override_load]]
+pc = 0x08035AC2
+func = "ws_despawn_bottom"
+# despawn test 0801C9C4
+[[override_load]]
+pc = 0x0801CA8A
+func = "ws_despawn_left"
+[[override_load]]
+pc = 0x0801CA9A
+func = "ws_despawn_top"
+[[override_load]]
+pc = 0x0801CA94
+func = "ws_despawn_right"
+[[override_load]]
+pc = 0x0801CAA4
+func = "ws_despawn_bottom"
+# despawn test 08027562
+[[override_load]]
+pc = 0x080275AA
+func = "ws_despawn_left"
+[[override_load]]
+pc = 0x080275BA
+func = "ws_despawn_top"
+[[override_load]]
+pc = 0x080275B4
+func = "ws_despawn_right"
+[[override_load]]
+pc = 0x080275C4
+func = "ws_despawn_bottom"
+# despawn test 0802776E
+[[override_load]]
+pc = 0x08027834
+func = "ws_despawn_left"
+[[override_load]]
+pc = 0x08027844
+func = "ws_despawn_top"
+[[override_load]]
+pc = 0x0802783E
+func = "ws_despawn_right"
+[[override_load]]
+pc = 0x0802784E
+func = "ws_despawn_bottom"
+# despawn test 0802D940
+[[override_load]]
+pc = 0x0802D9F4
+func = "ws_despawn_left"
+[[override_load]]
+pc = 0x0802DA04
+func = "ws_despawn_top"
+[[override_load]]
+pc = 0x0802D9FE
+func = "ws_despawn_right"
+[[override_load]]
+pc = 0x0802DA0E
+func = "ws_despawn_bottom"
+
+# Screen-space culls against constant native-screen rectangles in ROM: the
+# object's screen position against {-7,-7,240,160} or {0,0,240,160}.
+# screen-rect cull 0800C4DA rect 08072540 {-7,-7,240,160} debris (LoG2 0x0800ECF8)
+[[override_load]]
+pc = 0x0800C50C
+func = "ws_scull_left"
+[[override_load]]
+pc = 0x0800C512
+func = "ws_scull_right"
+[[override_load]]
+pc = 0x0800C51A
+func = "ws_scull_top"
+[[override_load]]
+pc = 0x0800C520
+func = "ws_scull_bottom"
+# screen-rect cull 080163E6 rect 086B813C {-7,-7,240,160}
+[[override_load]]
+pc = 0x08016406
+func = "ws_scull_left"
+[[override_load]]
+pc = 0x0801640C
+func = "ws_scull_right"
+[[override_load]]
+pc = 0x08016412
+func = "ws_scull_top"
+[[override_load]]
+pc = 0x08016418
+func = "ws_scull_bottom"
+# screen-rect cull 08026F2A rect 0874D02C {-7,-7,240,160}
+[[override_load]]
+pc = 0x08026F52
+func = "ws_scull_left"
+[[override_load]]
+pc = 0x08026F58
+func = "ws_scull_right"
+[[override_load]]
+pc = 0x08026F60
+func = "ws_scull_top"
+[[override_load]]
+pc = 0x08026F66
+func = "ws_scull_bottom"
+# screen-rect cull 08021762 rect 087251C8 {0,0,240,160}
+[[override_load]]
+pc = 0x0802178E
+func = "ws_scull_left"
+[[override_load]]
+pc = 0x08021788
+func = "ws_scull_right"
+[[override_load]]
+pc = 0x0802179A
+func = "ws_scull_top"
+[[override_load]]
+pc = 0x08021794
+func = "ws_scull_bottom"
+# screen-rect cull 08028A24 rect 0874EAB4 {0,0,240,160}
+[[override_load]]
+pc = 0x08028A62
+func = "ws_scull_left"
+[[override_load]]
+pc = 0x08028A54
+func = "ws_scull_right"
+[[override_load]]
+pc = 0x08028A72
+func = "ws_scull_top"
+[[override_load]]
+pc = 0x08028A6C
+func = "ws_scull_bottom"
+# screen-rect cull 08028DEA rect 0874EAEC {0,0,240,160}
+[[override_load]]
+pc = 0x08028E28
+func = "ws_scull_left"
+[[override_load]]
+pc = 0x08028E1A
+func = "ws_scull_right"
+[[override_load]]
+pc = 0x08028E38
+func = "ws_scull_top"
+[[override_load]]
+pc = 0x08028E32
+func = "ws_scull_bottom"
+# screen-rect cull 0802A5EC rect 087502AC {0,0,240,160}
+[[override_load]]
+pc = 0x0802A62A
+func = "ws_scull_left"
+[[override_load]]
+pc = 0x0802A61C
+func = "ws_scull_right"
+[[override_load]]
+pc = 0x0802A63A
+func = "ws_scull_top"
+[[override_load]]
+pc = 0x0802A634
+func = "ws_scull_bottom"
+# screen-rect cull 080357D2 rect 08759510 {0,0,240,160}
+[[override_load]]
+pc = 0x08035810
+func = "ws_scull_left"
+[[override_load]]
+pc = 0x08035802
+func = "ws_scull_right"
+[[override_load]]
+pc = 0x08035820
+func = "ws_scull_top"
+[[override_load]]
+pc = 0x0803581A
+func = "ws_scull_bottom"
+# screen-rect cull 080372A4 rect 0875F81C {0,0,240,160}
+[[override_load]]
+pc = 0x080372E8
+func = "ws_scull_left"
+[[override_load]]
+pc = 0x080372DC
+func = "ws_scull_right"
+[[override_load]]
+pc = 0x080372F8
+func = "ws_scull_top"
+[[override_load]]
+pc = 0x080372F2
+func = "ws_scull_bottom"
+# screen-rect cull 080381DC rect 0876CD28 {0,0,240,160}
+[[override_load]]
+pc = 0x0803821A
+func = "ws_scull_left"
+[[override_load]]
+pc = 0x0803820C
+func = "ws_scull_right"
+[[override_load]]
+pc = 0x0803822A
+func = "ws_scull_top"
+[[override_load]]
+pc = 0x08038224
+func = "ws_scull_bottom"
+# screen-rect cull 0803862E rect 0876E0CC {0,0,240,160}
+[[override_load]]
+pc = 0x0803866C
+func = "ws_scull_left"
+[[override_load]]
+pc = 0x0803865E
+func = "ws_scull_right"
+[[override_load]]
+pc = 0x0803867C
+func = "ws_scull_top"
+[[override_load]]
+pc = 0x08038676
+func = "ws_scull_bottom"
+
+# Rect test 0x080532C0 (r0 rect vs r1 rect {x0,y0,x1,y1}, LoG2 0x0802805C);
+# the beam emitters pass the screen rects {0,0,240,160} at 0x0872505C and
+# 0x0872506C as r1: only those are widened.
+[[hook_before]]
+pc = 0x080532C0
+func = "ws_hook_recttest"
+[[override_load]]
+pc = 0x080532C2
+func = "ws_rect_right"
+[[override_load]]
+pc = 0x080532C8
+func = "ws_rect_left"
+[[override_load]]
+pc = 0x080532D2
+func = "ws_rect_bottom"
+[[override_load]]
+pc = 0x080532D8
+func = "ws_rect_top"
+
+# Sprite build (0x080115B0, LoG2 0x08006AD8): shadow OAM cleared, emit
+# bracket, upload (memcpy32 to OAM through 0x0803DA62).
+[[hook_before]]
+pc = 0x080116A6
+func = "ws_hook_oam_clear"
+[[hook_before]]
+pc = 0x080116D6
+func = "ws_hook_emit_begin"
+[[hook_before]]
+pc = 0x080116DC
+func = "ws_hook_emit_end"
+[[hook_before]]
+pc = 0x08011586
+func = "ws_hook_oam_upload"
+[[hook_before]]
+pc = 0x080117C6
+func = "ws_hook_oam_upload"
+# OAM overflow guard: emit pointer loaded at 0x080116D2 (r1 = vtable)
+[[hook_before]]
+pc = 0x080116D2
+func = "ws_hook_emit_guard"
+[[override_load]]
+pc = 0x080116D2
+func = "ws_emit_guard"
+
+# OAM coordinate pack sites: "lsls rd, rs, #23" (x into attr1) and
+# "lsls rd, rs, #24" (y into attr0); rs holds the full signed coordinate.
+# _m256: the site packs y-32/-16/-12/-8/-3 as y+0xE0/F0/F4/F8/FD.
+# ws_p?_buu_*: the coordinate includes a signed piece offset loaded with
+# ldrb/ldrh; the hook adds the sign back (widescreen.c).
+[[hook_before]]
+pc = 0x0800ACD2
+func = "ws_px_r1"
+[[hook_before]]
+pc = 0x0800B3D6
+func = "ws_px_r0"
+[[hook_before]]
+pc = 0x0800B438
+func = "ws_px_r2"
+[[hook_before]]
+pc = 0x0800B48A
+func = "ws_px_r2"
+[[hook_before]]
+pc = 0x0800B4DC
+func = "ws_px_r1"
+[[hook_before]]
+pc = 0x0800C3A4
+func = "ws_px_r5"
+[[hook_before]]
+pc = 0x0800C542
+func = "ws_px_r3"
+[[hook_before]]
+pc = 0x0800CCA8
+func = "ws_px_r5"
+[[hook_before]]
+pc = 0x0800CF9C
+func = "ws_px_r4"
+[[hook_before]]
+pc = 0x0800D6F0
+func = "ws_px_r3"
+[[hook_before]]
+pc = 0x0800DAA8
+func = "ws_px_r3"
+[[hook_before]]
+pc = 0x0800F0E4
+func = "ws_px_r0"
+[[hook_before]]
+pc = 0x0800F140
+func = "ws_px_r1"
+[[hook_before]]
+pc = 0x0800F21A
+func = "ws_px_buu_piece"
+[[hook_before]]
+pc = 0x0800F270
+func = "ws_px_buu_piece"
+[[hook_before]]
+pc = 0x0800F306
+func = "ws_px_r0"
+[[hook_before]]
+pc = 0x08016440
+func = "ws_px_r2"
+[[hook_before]]
+pc = 0x080179AE
+func = "ws_px_r0"
+[[hook_before]]
+pc = 0x080182EC
+func = "ws_px_r2"
+[[hook_before]]
+pc = 0x08018658
+func = "ws_px_r3"
+[[hook_before]]
+pc = 0x08019C5C
+func = "ws_px_r3"
+[[hook_before]]
+pc = 0x08020D58
+func = "ws_px_r2"
+[[hook_before]]
+pc = 0x08020E4C
+func = "ws_px_r2"
+[[hook_before]]
+pc = 0x080217C4
+func = "ws_px_r3"
+[[hook_before]]
+pc = 0x080223FA
+func = "ws_px_r3"
+[[hook_before]]
+pc = 0x08022436
+func = "ws_px_r4"
+[[hook_before]]
+pc = 0x080248F4
+func = "ws_px_r3"
+[[hook_before]]
+pc = 0x08026D48
+func = "ws_px_r3"
+[[hook_before]]
+pc = 0x08026EB6
+func = "ws_px_r3"
+[[hook_before]]
+pc = 0x0802716E
+func = "ws_px_r3"
+[[hook_before]]
+pc = 0x08027AB8
+func = "ws_px_r7"
+[[hook_before]]
+pc = 0x08028282
+func = "ws_px_r1"
+[[hook_before]]
+pc = 0x080282D2
+func = "ws_px_r2"
+[[hook_before]]
+pc = 0x08028324
+func = "ws_px_r0"
+[[hook_before]]
+pc = 0x08028A82
+func = "ws_px_r4"
+[[hook_before]]
+pc = 0x08028E48
+func = "ws_px_r4"
+[[hook_before]]
+pc = 0x0802A64A
+func = "ws_px_r4"
+[[hook_before]]
+pc = 0x0802A968
+func = "ws_px_r3"
+[[hook_before]]
+pc = 0x0802C004
+func = "ws_px_r4"
+[[hook_before]]
+pc = 0x080302EA
+func = "ws_px_r1"
+[[hook_before]]
+pc = 0x08030328
+func = "ws_px_r2"
+[[hook_before]]
+pc = 0x08030998
+func = "ws_px_r4"
+[[hook_before]]
+pc = 0x08035830
+func = "ws_px_r4"
+[[hook_before]]
+pc = 0x080367B8
+func = "ws_px_r2"
+[[hook_before]]
+pc = 0x08036C0E
+func = "ws_px_r3"
+[[hook_before]]
+pc = 0x08037308
+func = "ws_px_r4"
+[[hook_before]]
+pc = 0x0803823A
+func = "ws_px_r4"
+[[hook_before]]
+pc = 0x0803868C
+func = "ws_px_r4"
+[[hook_before]]
+pc = 0x0803896E
+func = "ws_px_r3"
+[[hook_before]]
+pc = 0x080389C8
+func = "ws_px_r7"
+[[hook_before]]
+pc = 0x08038A1E
+func = "ws_px_r4"
+[[hook_before]]
+pc = 0x0800ACE2
+func = "ws_py_r2"
+[[hook_before]]
+pc = 0x0800B3DE
+func = "ws_py_r2_m256"
+[[hook_before]]
+pc = 0x0800C3BC
+func = "ws_py_r2_m256"
+[[hook_before]]
+pc = 0x0800C54E
+func = "ws_py_r0"
+[[hook_before]]
+pc = 0x0800CCB4
+func = "ws_py_r5"
+[[hook_before]]
+pc = 0x0800CFAE
+func = "ws_py_r2"
+[[hook_before]]
+pc = 0x0800D6FC
+func = "ws_py_r3"
+[[hook_before]]
+pc = 0x0800DAB4
+func = "ws_py_r3"
+[[hook_before]]
+pc = 0x0800F104
+func = "ws_py_r0_m256"
+[[hook_before]]
+pc = 0x0800F150
+func = "ws_py_buu_shadow"
+[[hook_before]]
+pc = 0x0800F242
+func = "ws_py_buu_piece"
+[[hook_before]]
+pc = 0x0800F296
+func = "ws_py_buu_piece"
+[[hook_before]]
+pc = 0x0801644C
+func = "ws_py_r2"
+[[hook_before]]
+pc = 0x080179BC
+func = "ws_py_r1_m256"
+[[hook_before]]
+pc = 0x080182F6
+func = "ws_py_r1"
+[[hook_before]]
+pc = 0x08018662
+func = "ws_py_r2"
+[[hook_before]]
+pc = 0x08019C68
+func = "ws_py_r3"
+[[hook_before]]
+pc = 0x08020D66
+func = "ws_py_r2"
+[[hook_before]]
+pc = 0x08020E58
+func = "ws_py_r2"
+[[hook_before]]
+pc = 0x080217D0
+func = "ws_py_r3"
+[[hook_before]]
+pc = 0x08022406
+func = "ws_py_r4"
+[[hook_before]]
+pc = 0x0802244A
+func = "ws_py_buu_r4_b5"
+[[hook_before]]
+pc = 0x08024900
+func = "ws_py_r3"
+[[hook_before]]
+pc = 0x08026D54
+func = "ws_py_r2"
+[[hook_before]]
+pc = 0x08026EC2
+func = "ws_py_r3"
+[[hook_before]]
+pc = 0x08027182
+func = "ws_py_r3_m256"
+[[hook_before]]
+pc = 0x08027AD4
+func = "ws_py_r4"
+[[hook_before]]
+pc = 0x08028A90
+func = "ws_py_r3"
+[[hook_before]]
+pc = 0x08028E56
+func = "ws_py_r3"
+[[hook_before]]
+pc = 0x0802A658
+func = "ws_py_r3"
+[[hook_before]]
+pc = 0x0802A974
+func = "ws_py_r3"
+[[hook_before]]
+pc = 0x0802C010
+func = "ws_py_r5"
+[[hook_before]]
+pc = 0x080302F8
+func = "ws_py_r3_m256"
+[[hook_before]]
+pc = 0x08030334
+func = "ws_py_r3"
+[[hook_before]]
+pc = 0x080309A4
+func = "ws_py_r5"
+[[hook_before]]
+pc = 0x0803583E
+func = "ws_py_r3"
+[[hook_before]]
+pc = 0x080367C6
+func = "ws_py_r3"
+[[hook_before]]
+pc = 0x08036C1A
+func = "ws_py_r3"
+[[hook_before]]
+pc = 0x08037316
+func = "ws_py_r3"
+[[hook_before]]
+pc = 0x08038248
+func = "ws_py_r3"
+[[hook_before]]
+pc = 0x0803869A
+func = "ws_py_r3"
+[[hook_before]]
+pc = 0x08038984
+func = "ws_py_buu_r6_b"
+[[hook_before]]
+pc = 0x080389D8
+func = "ws_py_buu_r6_b"
+[[hook_before]]
+pc = 0x08038A30
+func = "ws_py_buu_r4_b"
+[[hook_before]]
+pc = 0x0800F314
+func = "ws_py_buu_aux"

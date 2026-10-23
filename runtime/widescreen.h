@@ -139,6 +139,7 @@ void ws_px_r3(const uint32_t *regs);
 void ws_px_r4(const uint32_t *regs);
 void ws_px_r5(const uint32_t *regs);
 void ws_px_r6(const uint32_t *regs);
+void ws_px_r7(const uint32_t *regs);
 void ws_py_r0(const uint32_t *regs);
 void ws_py_r1(const uint32_t *regs);
 void ws_py_r2(const uint32_t *regs);
@@ -146,6 +147,9 @@ void ws_py_r3(const uint32_t *regs);
 void ws_py_r4(const uint32_t *regs);
 void ws_py_r5(const uint32_t *regs);
 void ws_py_r6(const uint32_t *regs);
+void ws_py_r7(const uint32_t *regs);
+void ws_py_r0_m256(const uint32_t *regs);
+void ws_py_r1_m256(const uint32_t *regs);
 void ws_py_r2_m256(const uint32_t *regs);
 void ws_py_r3_m256(const uint32_t *regs);
 
