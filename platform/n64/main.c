@@ -59,8 +59,8 @@ static struct {
     int profile_from;    /* start the sampling profiler at this frame */
     int frames;
     int shots[64], nshots;
-    keyspan_t spans[256];
-    int nspans;
+    keyspan_t spans[2048];
+    int nspans, spans_dropped;
 } test;
 
 static uint16_t parse_keys(const char *s) {
@@ -101,15 +101,21 @@ static void load_test_script(void) {
             if (test.nshots < 64)
                 test.shots[test.nshots++] = a;
         } else if (sscanf(line, "keys %d-%d:%95s", &a, &b, k) == 3) {
-            if (test.nspans < 256)
+            if (test.nspans < 2048)
                 test.spans[test.nspans++] = (keyspan_t){ a, b, parse_keys(k) };
+            else
+                test.spans_dropped++;
         } else if (sscanf(line, "keys %d:%95s", &a, k) == 2) {
-            if (test.nspans < 256)
+            if (test.nspans < 2048)
                 test.spans[test.nspans++] = (keyspan_t){ a, a, parse_keys(k) };
+            else
+                test.spans_dropped++;
         }
     }
     fclose(f);
     debugf("test mode: %d frames, %d shots, %d key spans\n", test.frames, test.nshots, test.nspans);
+    if (test.spans_dropped)
+        debugf("test mode: WARNING %d key spans over the limit were ignored\n", test.spans_dropped);
 }
 
 static void fb_dump(int frame, surface_t *s) {

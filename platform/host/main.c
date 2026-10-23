@@ -89,8 +89,8 @@ static const char *save_path;
 static const char *wav_path;
 
 typedef struct { int from, to; uint16_t keys; } keyspan_t;
-static keyspan_t spans[256];
-static int nspans;
+static keyspan_t *spans;
+static int nspans, spans_cap;
 static uint16_t cur_keys = 0x3FF;
 
 static uint16_t parse_keys(const char *s) {
@@ -118,7 +118,12 @@ static void parse_spans(const char *s) {
         if (sscanf(tok, "%d-%d", &k.from, &k.to) != 2)
             k.to = k.from = atoi(tok);
         k.keys = parse_keys(colon + 1);
-        if (nspans < 256) spans[nspans++] = k;
+        if (nspans == spans_cap) {
+            spans_cap = spans_cap ? spans_cap * 2 : 256;
+            spans = realloc(spans, (size_t)spans_cap * sizeof *spans);
+            if (!spans) { perror("realloc"); exit(1); }
+        }
+        spans[nspans++] = k;
     }
     free(dup);
 }
@@ -426,6 +431,8 @@ void plat_frame(void) {
 
 uint16_t plat_keyinput(void) { return cur_keys; }
 
+/* scripted runs wake at once, as if the wake keys were already held (the N64
+ * build waits for L+R+Select) */
 void plat_sleep(void) { plat_log("guest entered Stop (sleep)"); }
 
 void plat_log(const char *fmt, ...) {
