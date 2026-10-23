@@ -769,6 +769,21 @@ func = "ws_rect_bottom"
 [[override_load]]
 pc = 0x080532D8
 func = "ws_rect_top"
+# The beam update 0x0802084C (calls at 0x08020A46, 0x08020B44) passes the
+# camera rect 0x030019BC as r0: the beam is removed a few frames after its
+# head leaves the camera (despawn); r0's loads widen for that rect only.
+[[override_load]]
+pc = 0x080532C0
+func = "ws_buu_camrect_left"
+[[override_load]]
+pc = 0x080532CA
+func = "ws_buu_camrect_right"
+[[override_load]]
+pc = 0x080532D0
+func = "ws_buu_camrect_top"
+[[override_load]]
+pc = 0x080532DA
+func = "ws_buu_camrect_bottom"
 
 # Sprite build (0x080115B0, LoG2 0x08006AD8): shadow OAM cleared, emit
 # bracket, upload (memcpy32 to OAM through 0x0803DA62).

@@ -216,12 +216,16 @@ uint32_t ws_scull_right(uint32_t v)  { int ox, oy; if (!widen_active()) return v
 uint32_t ws_scull_top(uint32_t v)    { int ox, oy; if (!widen_active()) return v; view_offset(&ox, &oy); return v + (uint32_t)oy; }
 uint32_t ws_scull_bottom(uint32_t v) { int ox, oy; if (!widen_active()) return v; view_offset(&ox, &oy); return v + (uint32_t)(oy + WS_H - 160); }
 
-/* 0x080532C0 is a generic rect-overlap test (r0, r1 = rects); only the two
- * constant screen rectangles the beam emitters pass are widened */
+/* 0x080532C0 is a generic rect-overlap test (r0, r1 = rects).  Two uses
+ * are widened: the beam emitters' segment culls pass one of the constant
+ * screen rectangles as r1, and the beam's update (0x0802084C, calls at
+ * 0x08020A46 / 0x08020B44) passes the camera rect itself as r0: a beam
+ * whose head stays off the camera for a few frames is removed, a despawn
+ * test. */
 #define SCREEN_RECT_ROM_A 0x0872505Cu
 #define SCREEN_RECT_ROM_B 0x0872506Cu
-static uint32_t recttest_r1;
-void ws_hook_recttest(const uint32_t *regs) { recttest_r1 = regs[1]; }
+static uint32_t recttest_r0, recttest_r1;
+void ws_hook_recttest(const uint32_t *regs) { recttest_r0 = regs[0]; recttest_r1 = regs[1]; }
 static inline int recttest_screen(void) {
     return recttest_r1 == SCREEN_RECT_ROM_A || recttest_r1 == SCREEN_RECT_ROM_B;
 }
@@ -229,6 +233,10 @@ uint32_t ws_rect_left(uint32_t v)   { return recttest_screen() ? ws_scull_left(v
 uint32_t ws_rect_right(uint32_t v)  { return recttest_screen() ? ws_scull_right(v) : v; }
 uint32_t ws_rect_top(uint32_t v)    { return recttest_screen() ? ws_scull_top(v) : v; }
 uint32_t ws_rect_bottom(uint32_t v) { return recttest_screen() ? ws_scull_bottom(v) : v; }
+uint32_t ws_buu_camrect_left(uint32_t v)   { return recttest_r0 == CAM_L ? ws_despawn_left(v) : v; }
+uint32_t ws_buu_camrect_right(uint32_t v)  { return recttest_r0 == CAM_L ? ws_despawn_right(v) : v; }
+uint32_t ws_buu_camrect_top(uint32_t v)    { return recttest_r0 == CAM_L ? ws_despawn_top(v) : v; }
+uint32_t ws_buu_camrect_bottom(uint32_t v) { return recttest_r0 == CAM_L ? ws_despawn_bottom(v) : v; }
 
 /* ------------------------------------------------------------ chunk decoder */
 
@@ -477,12 +485,12 @@ static int setup_layer(int bg, uint32_t obj, uint32_t vt) {
     return 1;
 }
 
-/* A field the game stops presenting while it stays on screen (the R scan
- * mode with its target ring, event triggers in towns: 10-80 frames, the
- * sprite build keeps running) keeps the field view, so the picture does not
- * jump to the centred native frame and back.  It must be the field of the
- * last presented frame: the same layer objects and map, every scroll
- * register unchanged. */
+/* A field the game stops presenting while it stays on screen (while B is
+ * held the hero charges up inside a ring: 40-110 frames, and the sprite
+ * build keeps running) keeps the field view, so the picture does not jump
+ * to the centred native frame and back.  It must be the field of the last
+ * presented frame: the same layer objects, every scroll register
+ * unchanged. */
 static int field_prev;                   /* field view in the previous frame */
 static uint32_t live_layers[4];          /* layer set of the last presented field frame */
 static uint16_t live_scroll[8];          /* its BGxHOFS/VOFS */
