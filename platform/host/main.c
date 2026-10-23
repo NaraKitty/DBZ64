@@ -328,6 +328,19 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--every")) { every = atoi(v); i++; }
         else if (!strcmp(a, "--out")) { outdir = v; i++; }
         else if (!strcmp(a, "--keys")) { parse_spans(v); i++; }
+        else if (!strcmp(a, "--keys-file")) {
+            FILE *kf = fopen(v, "r");
+            if (kf) {
+                static char kb[1 << 16];
+                size_t n = fread(kb, 1, sizeof kb - 1, kf);
+                kb[n] = 0;
+                fclose(kf);
+                for (char *p = kb; *p; p++)
+                    if (*p == '\n' || *p == '\r') *p = ';';
+                parse_spans(kb);
+            }
+            i++;
+        }
         else if (!strcmp(a, "--save")) { save_path = v; i++; }
         else if (!strcmp(a, "--wav")) { wav_path = v; i++; }
         else if (!strcmp(a, "--rom-profile")) { rom_profile = 1; }
