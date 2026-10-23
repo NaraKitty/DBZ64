@@ -48,18 +48,28 @@ adapter libraries and ARM soft-float code. What differs from LoG2:
 - The IRQ dispatcher (0x03000B6C) tests Serial and Timer3 right after DMA2.
 - EEPROM library V124 (64 Kbit, as LoG2); SWI 0x0B CpuSet in the link
   libraries; the IWRAM routines memcpy32/memset32/memcpy16/memset16 replace
-  most DMA3 copies (memcpy16 is a Duff's device whose computed-jump targets
-  are seeded in game.toml).
+  most DMA3 copies. memcpy16, a Duff's device and the game's hottest
+  routine, is native (`games/buu/native.c`).
 - The sound engine, mixer and FIFO model are LoG2's (`native_mix_voice` and
   `native_clip` apply unchanged).
 - No 320×240 field view yet: `games/buu/widescreen.c` always gives the
   native view.
 
 Status: the host build plays from power-on through the logos, title, a new
-game and the story intro into gameplay with no dispatch misses, matching the
-interpreter (RAM identical at every checked VBlank outside the dead stack)
-and the mGBA oracle's audio. The N64 build (CPU renderer) runs the same
-script in ares with frames identical to the host's.
+game and the story intro into gameplay with no dispatch misses. It matches
+the interpreter (RAM identical at every 500th VBlank outside the dead stack,
+identical frames, audio and save) and the mGBA oracle's audio. Option
+changes are saved to EEPROM and read back at boot. The N64 build (TLB, CPU
+renderer) runs the same script in ares with frames identical to the host's
+and keeps the save in SRAM. Game logic in ares: logos 1–2.5 ms, title
+~7 ms, story scenes 3–7.5 ms, field gameplay 5.8–6.2 ms per frame. Code is
+3.27 MB of MIPS and BSS 1.6 MB.
+
+Open: the field view; the RDP renderer for Buu's Fury (the CPU renderer
+needs ~70 ms per frame); register summaries of the ARM soft-float routines
+(their save/restore of r4–r11 is not recognised, which widens the indirect
+call summary by r8–r11); the link-cable and wireless modes only reach
+"Waiting for a friend..." (cancel works; serial is not modelled).
 
 ### Code discovery (`tools/analyze.py`)
 For LoG2 (`games/log2/game.toml`):
