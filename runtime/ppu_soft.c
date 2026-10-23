@@ -376,9 +376,18 @@ static void draw_objs(int line, uint32_t dispcnt) {
             uint32_t idx = vram8(addr);
             if (!bpp8)
                 idx = (tx & 1) ? idx >> 4 : idx & 15;
-            if (!idx)
-                continue;
             int b = x - sx0;
+            if (!idx) {
+                /* hardware quirk (as mGBA): a transparent texel of a
+                 * later OBJ with a higher priority still gives the OBJ
+                 * pixel already there its priority and blend mode, so a
+                 * low-priority OBJ can show above a BG through it */
+                if (mode != 2 && obj_col[b] != TRANSP && prio < obj_prio[b]) {
+                    obj_prio[b] = prio;
+                    obj_semi[b] = mode == 1;
+                }
+                continue;
+            }
             if (mode == 2) {
                 obj_win[b] = 1;
                 continue;
