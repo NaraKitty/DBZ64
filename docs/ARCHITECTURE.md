@@ -58,7 +58,13 @@ adapter libraries and ARM soft-float code. What differs from LoG2:
 Status: the host build plays from power-on through the logos, title, a new
 game and the story intro into gameplay with no dispatch misses. It matches
 the interpreter (RAM identical at every 500th VBlank outside the dead stack,
-identical frames, audio and save) and the mGBA oracle's audio. Option
+identical frames, audio and save). Against the mGBA oracle, with input
+replayed by key read (the gameplay script, three 60,000-frame random-input
+runs, credits, sleep, soft reset, multiplayer menu, idle title): 99.9% of
+the pictures match exactly. The rest are frames where the game writes
+during scan-out on hardware. The game state in RAM is identical apart from
+sound-mixer timing, the stack and a CPU-load meter (0x03000FEC). Saves
+match byte for byte. Option
 changes are saved to EEPROM and read back at boot. The N64 build (TLB, CPU
 renderer) runs the same script in ares with frames identical to the host's
 and keeps the save in SRAM. Game logic in ares: logos 1–2.5 ms, title
@@ -69,7 +75,9 @@ Open: the field view; the RDP renderer for Buu's Fury (the CPU renderer
 needs ~70 ms per frame); register summaries of the ARM soft-float routines
 (their save/restore of r4–r11 is not recognised, which widens the indirect
 call summary by r8–r11); the link-cable and wireless modes only reach
-"Waiting for a friend..." (cancel works; serial is not modelled).
+"Waiting for a friend..." (cancel works; serial is not modelled); a game
+progress save (only the options block has been written so far); coverage
+beyond the start of the story (about 1,060 of the 4,435 functions have run).
 
 ### Code discovery (`tools/analyze.py`)
 For LoG2 (`games/log2/game.toml`):
@@ -181,7 +189,9 @@ the interpreter (`runtime/interp.c`) a reference for the recompiled code:
    adds `platform/host/debug.c`: it keeps the last 4096 function entries and
    prints them when the run dies.
 3. `GBA_INTERP_FN=lo-hi[,lo-hi...]` runs the functions entered in those
-   ranges, and everything they call, in the interpreter.
+   ranges, and everything they call, in the interpreter. (A dispatch miss
+   interprets only the missing function: the interpreter puts back the
+   registers its recompiled callees preserve, see `runtime/dispatch.h`.)
    `08000000-08000001` (the reset entry) interprets the whole game. If a
    failure disappears when a range is interpreted, bisect the range down to
    the function whose recompiled code misbehaves.
