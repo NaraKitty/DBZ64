@@ -602,16 +602,16 @@ int main(void) {
     if (test.active)
         prof_watchdog_start();
     load_save();
-    /* the game stack first: the ROM cache then takes what is left, up to
-     * ROM_CACHE_BYTES, keeping ROM_HEAP_RESERVE for later allocations (the
-     * renderer's affine/bitmap raster buffers, libc) */
-    uint8_t *stack = memalign(16, GAME_STACK);
-    if (!stack)
-        gba_panic("cannot allocate the game stack (%d bytes)", GAME_STACK);
+    /* the ROM cache takes what is left, up to ROM_CACHE_BYTES, after the
+     * game stack (allocated after it: its place in the D-cache's index
+     * space, relative to the hot data, is what the timings were tuned with),
+     * keeping ROM_HEAP_RESERVE for later allocations (the renderer's
+     * affine/bitmap raster buffers, libc) and 16KB for the cache's
+     * alignment */
     {
         heap_stats_t hs0;
         sys_get_heap_stats(&hs0);
-        int cache = hs0.total - hs0.used - ROM_HEAP_RESERVE;
+        int cache = hs0.total - hs0.used - GAME_STACK - ROM_HEAP_RESERVE - 0x4000;
         if (cache > ROM_CACHE_BYTES)
             cache = ROM_CACHE_BYTES;
         cache &= ~0x3FFF;
@@ -619,6 +619,9 @@ int main(void) {
                hs0.total - hs0.used, cache / 1024);
         rom_cache_init(cache);
     }
+    uint8_t *stack = memalign(16, GAME_STACK);
+    if (!stack)
+        gba_panic("cannot allocate the game stack (%d bytes)", GAME_STACK);
     rom_cache_preload();
     debugf("rom cache: %lu pages preloaded\n", (unsigned long)rom_cache_stats.preloaded);
 #ifdef GBA_TLB

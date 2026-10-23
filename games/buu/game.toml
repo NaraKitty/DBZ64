@@ -394,16 +394,16 @@ func = "native_clip"
 # ---------------------------------------------------------------- ROM cache
 # 16KB ROM pages loaded into the N64 ROM cache at boot (host --rom-profile
 # traces of the gameplay script and a 20000-frame attract run).  The cache
-# here is 1.25 MB (78 pages, see platform/n64/main.c), of which the boot
-# preload may pin 7/8: the pages field play uses, most frames first, then
-# the rest of the script and the attract run.  In the simulation of the
-# cache over those traces field play (from frame 7300) never misses; the
-# story intro misses at its scene changes.
+# here is 1.25 MB (78 pages, see platform/n64/main.c) and the script alone
+# touches 118 pages, so only the 52 pages field play uses most are pinned
+# (most frames first), leaving a third of the cache to the LRU for scene
+# changes.  In a simulation of the cache over those traces field play (from
+# frame 7300) never misses; the story intro misses at its scene changes
+# (67 pages in 19 frames; 106 in 32 with 69 pages pinned).
 [rom]
 preload = [
     18, 429, 493, 215, 200, 430, 28, 19, 426, 427, 327, 455, 346, 358, 255, 323,
     210, 201, 357, 240, 213, 204, 212, 219, 238, 211, 223, 224, 452, 182, 29, 21,
     26, 27, 174, 203, 183, 191, 193, 322, 324, 198, 166, 453, 454, 5, 22, 434,
-    444, 446, 23, 456, 37, 38, 39, 42, 43, 50, 65, 78, 79, 80, 81, 94,
-    206, 205, 208, 207, 217,
+    444, 446, 23, 456,
 ]
