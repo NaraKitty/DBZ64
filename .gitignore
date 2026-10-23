@@ -1,0 +1,9 @@
+# never commit game data or code derived from it
+*.gba
+*.z64
+*.n64
+*.sav
+gen/
+build/
+__pycache__/
+*.pyc
