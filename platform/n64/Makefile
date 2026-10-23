@@ -22,13 +22,19 @@ GEN_SRC := $(wildcard $(GEN)/gen_*.c)
 OBJS := $(addprefix $(BUILD_DIR)/,$(RUNTIME_SRC:.c=.o) $(PLATFORM_SRC:.c=.o)) \
         $(patsubst $(GEN)/%.c,$(BUILD_DIR)/gen/%.o,$(GEN_SRC))
 
-CFLAGS += -I$(REPO)/runtime -I$(REPO)/platform/n64 -I$(REPO)/platform/n64/render -I$(GEN) \
+# TLB=1: guest memory mapped through the TLB (platform/n64/tlb.c)
+TLB ?= 1
+ifeq ($(TLB),1)
+MODE_FLAGS := -DGBA_TLB
+endif
+
+CFLAGS += $(MODE_FLAGS) -I$(REPO)/runtime -I$(REPO)/platform/n64 -I$(REPO)/platform/n64/render -I$(GEN) \
           -fno-strict-aliasing -Wno-error=format
 
 # Generated code: no -Werror, no pattern-initialised locals (they would cost
 # a store per local), and strict aliasing off like the runtime.
 GEN_CFLAGS = $(filter-out -O2 -Werror -ftrivial-auto-var-init=pattern,$(N64_CFLAGS)) \
-             -O2 -fno-strict-aliasing -w -MMD \
+             -O2 -fno-strict-aliasing -w -MMD $(MODE_FLAGS) \
              -I$(REPO)/runtime -I$(GEN)
 
 $(BUILD_DIR)/gen/%.o: $(GEN)/%.c

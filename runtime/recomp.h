@@ -54,7 +54,11 @@ void gba_bad_stack(uint32_t a);
 #else
 #define STK_CHECK(a) ((void)0)
 #endif
+#ifdef GBA_TLB
+#define STK32(a) (*(volatile uint32_t *)(uintptr_t)(a))   /* sp is always valid IWRAM */
+#else
 #define STK32(a) gba_mem.iwram[((a) & 0x7FFCu) >> 2]
+#endif
 
 static inline uint32_t sp_rd32(uint32_t a) { STK_CHECK(a); return STK32(a); }
 static inline void sp_wr32(uint32_t a, uint32_t v) { STK_CHECK(a); STK32(a) = v; }

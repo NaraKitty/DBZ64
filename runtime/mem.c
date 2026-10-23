@@ -78,14 +78,29 @@ static void vram_set_protect(uint32_t page, int protect) {
     }
 }
 
-static inline void vram_mark(uint32_t a) {
+#ifdef GBA_TLB
+/* generated code writes VRAM through the TLB: protection works on 16KB
+ * pages there, so a mark covers the four 4KB pages of the TLB page */
+void tlb_vram_set_writable(uint32_t page4k, int writable);
+#define VRAM_GRAIN 4u
+#else
+#define VRAM_GRAIN 1u
+#endif
+
+static inline uint32_t vram_offset(uint32_t a) {
     uint32_t off = a & 0x1FFFF;
-    if (off >= 0x18000)
-        off -= 0x8000;
-    uint32_t page = off >> 12;
-    if (!(gba_vram_dirty & (1u << page))) {
-        gba_vram_dirty |= 1u << page;
+    return off >= 0x18000 ? off - 0x8000 : off;
+}
+
+static inline void vram_mark(uint32_t a) {
+    uint32_t page = (vram_offset(a) >> 12) & ~(VRAM_GRAIN - 1);
+    uint32_t bits = ((1u << VRAM_GRAIN) - 1) << page;
+    if ((gba_vram_dirty & bits) != bits) {
+        gba_vram_dirty |= bits;
         vram_set_protect(page, 0);
+#ifdef GBA_TLB
+        tlb_vram_set_writable(page, 1);
+#endif
     }
 }
 
@@ -93,8 +108,13 @@ uint32_t gba_vram_take_dirty(void) {
     uint32_t d = gba_vram_dirty;
     gba_vram_dirty = 0;
     for (uint32_t page = 0; page < 24; page++)
-        if (d & (1u << page))
+        if (d & (1u << page)) {
             vram_set_protect(page, 1);
+#ifdef GBA_TLB
+            if ((page & (VRAM_GRAIN - 1)) == 0)
+                tlb_vram_set_writable(page, 0);
+#endif
+        }
     return d;
 }
 
@@ -194,7 +214,7 @@ void gba_wr32_slow(uint32_t a, uint32_t v) {
         return;
     case 0x06:
         vram_mark(a);
-        wr32(a, v);
+        gba_mem.vram[vram_offset(a) >> 2] = v;
         return;
     case 0x07:
         gba_mem.oam[(a & 0x3FC) >> 2] = v;
@@ -216,7 +236,7 @@ void gba_wr16_slow(uint32_t a, uint32_t v) {
         return;
     case 0x06:
         vram_mark(a);
-        wr16(a, v);
+        *(uint16_t *)((uint8_t *)gba_mem.vram + (vram_offset(a) ^ GBA_HX)) = (uint16_t)v;
         return;
     case 0x07:
         *(uint16_t *)((uint8_t *)gba_mem.oam + ((a & 0x3FE) ^ GBA_HX)) = (uint16_t)v;

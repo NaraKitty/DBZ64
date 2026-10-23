@@ -3,10 +3,11 @@
  *
  * The 8MB GBA ROM lives in the N64 cartridge (DFS file rom:/rom.bin, already
  * word-swapped to the runtime's native-word layout by tools/mkrom.py).  It
- * cannot fit in RDRAM next to the recompiled code, so 4KB pages are copied
- * in by PI DMA on first access and mapped into the runtime's page tables.
- * Pages are evicted round-robin; the sample data the mixer reads every frame
- * stays resident in practice because it is touched before anything else.
+ * cannot fit in RDRAM next to the recompiled code, so 16KB pages are copied
+ * in by PI DMA on first access.  A resident page is visible to the runtime
+ * through its 4KB page tables and, in GBA_TLB builds, to generated code
+ * through TLB entries installed on demand by tlb.c.  Pages are evicted
+ * round-robin; the measured working set (well under 1MB during play) fits.
  */
 #include <libdragon.h>
 #include <malloc.h>
@@ -14,8 +15,9 @@
 #include "gba.h"
 #include "rom.h"
 #include "rom_n64.h"
+#include "tlb.h"
 
-#define PAGE      0x1000u
+#define PAGE      0x4000u
 #define NPAGES    (GBA_ROM_SIZE / PAGE)
 
 static pi_addr_t rom_base;
@@ -32,7 +34,8 @@ void rom_cache_init(int bytes) {
     if (!rom_base)
         gba_panic("rom:/rom.bin missing from the filesystem");
     nslots = bytes / (int)PAGE;
-    slots = memalign(16, (size_t)nslots * PAGE);
+    /* 16KB aligned so a slot can back a 16KB TLB page */
+    slots = memalign(PAGE, (size_t)nslots * PAGE);
     if (!slots)
         gba_panic("cannot allocate the ROM cache (%d bytes)", bytes);
     slot_page = malloc(sizeof(int16_t) * (size_t)nslots);
@@ -43,20 +46,30 @@ void rom_cache_init(int bytes) {
     next_victim = 0;
 }
 
+static void map_page(uint32_t pg, const uint8_t *p) {
+    for (uint32_t k = 0; k < PAGE / 0x1000u; k++)
+        gba_mem_map_rom_page(0x08000 + pg * (PAGE / 0x1000u) + k, p ? p + k * 0x1000u : NULL);
+}
+
 void gba_rom_map_init(void) {
     /* called on boot and soft reset: re-map whatever is resident */
-    for (uint32_t pg = 0; pg < 0x1000; pg++) {
-        int s = pg < NPAGES ? page_slot[pg] : -1;
-        gba_mem_map_rom_page(0x08000 + pg, s >= 0 ? slots + (size_t)s * PAGE : NULL);
-    }
+    for (uint32_t pg4 = 0; pg4 < 0x1000; pg4++)
+        gba_mem_map_rom_page(0x08000 + pg4, NULL);
+    for (uint32_t pg = 0; pg < NPAGES; pg++)
+        if (page_slot[pg] >= 0)
+            map_page(pg, slots + (size_t)page_slot[pg] * PAGE);
 }
 
 static uint8_t *load_page(uint32_t pg) {
     int s = next_victim;
     next_victim = (next_victim + 1) % nslots;
     if (slot_page[s] >= 0) {
-        page_slot[slot_page[s]] = -1;
-        gba_mem_map_rom_page(0x08000 + (uint32_t)slot_page[s], NULL);
+        uint32_t old = (uint32_t)slot_page[s];
+        page_slot[old] = -1;
+        map_page(old, NULL);
+#ifdef GBA_TLB
+        tlb_rom_unmap(0x08000000u + old * PAGE);
+#endif
         rom_cache_stats.evictions++;
     }
     uint8_t *p = slots + (size_t)s * PAGE;
@@ -64,9 +77,20 @@ static uint8_t *load_page(uint32_t pg) {
     dma_read(p, rom_base + pg * PAGE, PAGE);
     slot_page[s] = (int16_t)pg;
     page_slot[pg] = (int16_t)s;
-    gba_mem_map_rom_page(0x08000 + pg, p);
+    map_page(pg, p);
     rom_cache_stats.misses++;
     return p;
+}
+
+const void *rom_page16_load(uint32_t va16k, int load) {
+    uint32_t off = va16k & 0x01FFFFFFu;
+    if (off >= GBA_ROM_SIZE)
+        return NULL;
+    uint32_t pg = off / PAGE;
+    int s = page_slot[pg];
+    if (s >= 0)
+        return slots + (size_t)s * PAGE;
+    return load ? load_page(pg) : NULL;
 }
 
 uint32_t gba_rom_read32(uint32_t a) {
@@ -75,9 +99,7 @@ uint32_t gba_rom_read32(uint32_t a) {
         uint32_t h = (a >> 1) & 0xFFFF;
         return h | ((h + 1) << 16);
     }
-    uint32_t pg = off / PAGE;
-    int s = page_slot[pg];
-    uint8_t *p = s >= 0 ? slots + (size_t)s * PAGE : load_page(pg);
+    const uint8_t *p = rom_page16_load(0x08000000u + off, 1);
     return *(const uint32_t *)(p + (off & (PAGE - 1)));
 }
 
@@ -85,8 +107,6 @@ const void *gba_rom_ptr(uint32_t addr, uint32_t len) {
     uint32_t off = addr & 0x01FFFFFFu;
     if (off + len > GBA_ROM_SIZE || ((off & (PAGE - 1)) + len) > PAGE)
         return NULL;
-    uint32_t pg = off / PAGE;
-    int s = page_slot[pg];
-    uint8_t *p = s >= 0 ? slots + (size_t)s * PAGE : load_page(pg);
+    const uint8_t *p = rom_page16_load(0x08000000u + off, 1);
     return p + (off & (PAGE - 1));
 }

@@ -24,6 +24,7 @@
 #include "io.h"
 #include "rom.h"
 #include "rom_n64.h"
+#include "tlb.h"
 #include "ppu_soft.h"
 
 void gba_boot(void);
@@ -280,9 +281,12 @@ void plat_frame(void) {
     flush_save();
 
     if ((frame % 120) == 0) {
-        uint32_t now = TICKS_READ();
+        uint64_t now = get_ticks();
+        debugf("f%d: tlb refills %lu emulated %lu vram marks %lu\n", frame,
+               (unsigned long)tlb_stats.rom_refills, (unsigned long)tlb_stats.emulated,
+               (unsigned long)tlb_stats.vram_marks);
         debugf("f%d: %.2f ms/frame, rom misses %lu evictions %lu\n", frame,
-               TICKS_TO_US((int32_t)(now - t_last)) / 120.0f / 1000.0f,
+               (double)TICKS_TO_US(now - t_last) / 120.0 / 1000.0,
                (unsigned long)rom_cache_stats.misses, (unsigned long)rom_cache_stats.evictions);
         t_last = now;
     }
@@ -312,12 +316,9 @@ void plat_sleep(void) {
  * 64KB, so the game runs on its own stack.  gba_boot() never returns. */
 static void __attribute__((noreturn)) run_game_on_stack(void *top) {
     __asm__ volatile(
-        "move $sp, %0
-"
-        "jal  gba_boot
-"
-        "nop
-"
+        "move $sp, %0\n"
+        "jal  gba_boot\n"
+        "nop\n"
         :: "r"((uintptr_t)top - 64) : "memory");
     __builtin_unreachable();
 }
@@ -334,6 +335,9 @@ int main(void) {
     load_test_script();
     load_save();
     rom_cache_init(ROM_CACHE_BYTES);
+#ifdef GBA_TLB
+    tlb_init();
+#endif
     t_last = get_ticks();
     uint8_t *stack = memalign(16, GAME_STACK);
     run_game_on_stack(stack + GAME_STACK);

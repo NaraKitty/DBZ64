@@ -769,8 +769,11 @@ static void interp_run(uint32_t start, int jump_mode) {
         int call = ((cpu.r[14] ^ seq) >> 1) == 0;
         for (;;) {
             if (((tgt ^ stop) >> 1) == 0) {
-                cpu.next_pc = stop;
-                set_tbit(stop & 1);
+                /* a caller compares the exact link; a jump-mode run must
+                 * keep the state really reached (a Thumb 'mov lr, pc' link
+                 * has bit 0 clear) for gba_run_from to resume it */
+                cpu.next_pc = jump_mode ? tgt : stop;
+                set_tbit(cpu.next_pc & 1);
                 return;
             }
             gba_func_t fn = lookup(tgt);

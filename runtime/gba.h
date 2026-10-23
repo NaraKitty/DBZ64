@@ -44,13 +44,26 @@ extern "C" {
 #define GBA_OAM_SIZE   0x400u
 #define GBA_ROM_SIZE   0x800000u
 
+/* GBA_TLB (N64 build): guest RAM is also mapped through the VR4300 TLB at
+ * the guest's own addresses (platform/n64/tlb.c), so generated code accesses
+ * it with plain loads/stores.  Each region must then be aligned to its TLB
+ * page size, and stay congruent mod 8KB so the virtually indexed D-cache sees
+ * the TLB view and the runtime's KSEG0 view as the same lines. */
+#ifdef GBA_TLB
+#define GBA_TLB_ALIGN(n) __attribute__((aligned(n)))
+#define GBA_PAL_ALLOC 0x2000u
+#else
+#define GBA_TLB_ALIGN(n)
+#define GBA_PAL_ALLOC GBA_PAL_SIZE
+#endif
+
 typedef struct gba_mem {
-    uint32_t ewram[GBA_EWRAM_SIZE / 4];
-    uint32_t iwram[GBA_IWRAM_SIZE / 4];
+    uint32_t ewram[GBA_EWRAM_SIZE / 4] GBA_TLB_ALIGN(0x40000);
+    uint32_t iwram[GBA_IWRAM_SIZE / 4] GBA_TLB_ALIGN(0x4000);
+    uint32_t vram[GBA_VRAM_SIZE / 4] GBA_TLB_ALIGN(0x4000);
+    uint32_t pal[GBA_PAL_ALLOC / 4] GBA_TLB_ALIGN(0x2000);
+    uint32_t oam[GBA_PAL_ALLOC / 4] GBA_TLB_ALIGN(0x2000);
     uint32_t io[GBA_IO_SIZE / 4];      /* raw register backing store */
-    uint32_t pal[GBA_PAL_SIZE / 4];
-    uint32_t vram[GBA_VRAM_SIZE / 4];
-    uint32_t oam[GBA_OAM_SIZE / 4];
     uint32_t bios[0x4000 / 4];
 } gba_mem_t;
 
@@ -88,6 +101,22 @@ static inline void *gba_host_wptr(uint32_t a) {
     return (p & GBA_PAGE_SLOW) ? NULL : (void *)(p + (a & 0xFFFu));
 }
 
+#ifdef GBA_TLB
+/* Guest memory is mapped at the guest's own addresses: one load/store plus
+ * the 28-bit address mask (the GBA ignores the top bits; it also keeps junk
+ * pointers out of KSEG0).  I/O, unmapped addresses, non-resident ROM,
+ * write-protected VRAM and unaligned accesses fault into
+ * platform/n64/tlb.c, which emulates the access with ARM semantics. */
+#define GBA_GA(a) ((uintptr_t)((a) & 0x0FFFFFFFu))
+static inline uint32_t rd32(uint32_t a) { return *(volatile const uint32_t *)GBA_GA(a); }
+static inline uint32_t rd16(uint32_t a) { return *(volatile const uint16_t *)(GBA_GA(a) ^ GBA_HX); }
+static inline uint32_t rd8(uint32_t a) { return *(volatile const uint8_t *)(GBA_GA(a) ^ GBA_BX); }
+/* an odd LDRSH faults; the handler returns the signed byte */
+static inline int32_t rd16s(uint32_t a) { return *(volatile const int16_t *)(GBA_GA(a) ^ GBA_HX); }
+static inline void wr32(uint32_t a, uint32_t v) { *(volatile uint32_t *)GBA_GA(a) = v; }
+static inline void wr16(uint32_t a, uint32_t v) { *(volatile uint16_t *)(GBA_GA(a) ^ GBA_HX) = (uint16_t)v; }
+static inline void wr8(uint32_t a, uint32_t v) { *(volatile uint8_t *)(GBA_GA(a) ^ GBA_BX) = (uint8_t)v; }
+#else
 /* ARM7 semantics: unaligned LDR rotates, unaligned LDRH rotates by 8,
  * unaligned stores ignore the low bits.  The slow path handles all of it. */
 static inline uint32_t rd32(uint32_t a) {
@@ -143,6 +172,8 @@ static inline void wr8(uint32_t a, uint32_t v) {
     }
     *(uint8_t *)(p + ((a & 0xFFFu) ^ GBA_BX)) = (uint8_t)v;
 }
+
+#endif
 
 /* direct I/O register view (byte offset into the 1KB register file) */
 static inline uint16_t io16(uint32_t off) {
