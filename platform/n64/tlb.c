@@ -288,7 +288,12 @@ void tlb_init(void) {
  * of a black screen.  Returns NULL when fine.  VRAM write tracking (TLB
  * modification exceptions) falls back to "everything dirty every frame" if
  * it does not work, which only costs some renderer time. */
+void gba_mem_init(void);
+
 const char *tlb_selftest(void) {
+    /* the emulated accesses go through the slow paths' page tables
+     * (gba_boot initialises everything again) */
+    gba_mem_init();
     volatile uint32_t *ew = gba_mem.ewram;
     ew[1] = 0x11223344u;
     if (rd32(0x02000004u) != 0x11223344u)
@@ -301,26 +306,38 @@ const char *tlb_selftest(void) {
     wr8(0x02000009u, 0x5Au);
     if (ew[2] != 0xCAFE5ABEu)
         return "EWRAM byte write";
-    gba_mem.iwram[0x7FFC / 4] = 0x03000824u;
-    if (rd32(0x03007FFCu) != 0x03000824u || rd32(0x03FFFFFCu) != 0x03000824u)
-        return "IWRAM mapping or mirror";
-    gba_mem.pal[1] = 0x7FFF0000u;
-    gba_mem.oam[1] = 0x12345678u;
+    /* host-side writes must be volatile too: the compiler cannot see that
+     * the guest addresses alias gba_mem */
+    volatile uint32_t *iw = gba_mem.iwram, *pal = gba_mem.pal, *oam = gba_mem.oam;
+    volatile uint32_t *vram = gba_mem.vram;
+    iw[0x7FFC / 4] = 0x03000824u;
+    uint32_t a = rd32(0x03007FFCu), b = rd32(0x03FFFFFCu);
+    if (a != 0x03000824u || b != 0x03000824u) {
+        debugf("selftest: iwram %08lX mirror %08lX\n", (unsigned long)a, (unsigned long)b);
+        return a != 0x03000824u ? "IWRAM mapping" : "IWRAM mirror at 0x03FF8000";
+    }
+    pal[1] = 0x7FFF0000u;
+    oam[1] = 0x12345678u;
     if (rd32(0x05000004u) != 0x7FFF0000u || rd32(0x07000004u) != 0x12345678u)
         return "palette/OAM mapping";
     for (uint32_t pg = 0; pg < 6; pg++) {
-        gba_mem.vram[pg * 0x1000u] = 0xA5000000u + pg;
+        vram[pg * 0x1000u] = 0xA5000000u + pg;
         if (rd32(0x06000000u + pg * 0x4000u) != 0xA5000000u + pg)
             return "VRAM mapping";
     }
     if (rd32(0x06018000u) != 0xA5000004u)
         return "VRAM mirror";
-    /* faults: unaligned load (ARM rotate), I/O read, ROM page-in */
+    /* faults: unaligned load (ARM rotate), I/O read, ROM page-in.  The
+     * address is hidden from the compiler, which would otherwise see the
+     * misalignment and emit lwl/lwr instead of a faulting lw. */
     ew[3] = 0x44332211u;
-    if (rd32(0x0200000Du) != 0x11443322u)
+    uint32_t ua = 0x0200000Du;
+    __asm__("" : "+r"(ua));
+    if (rd32(ua) != 0x11443322u)
         return "unaligned load emulation";
     uint32_t e0 = tlb_stats.emulated;
     (void)rd16(0x04000006u);           /* VCOUNT: emulated I/O read */
+    __asm__ volatile("" ::: "memory"); /* the handler updated tlb_stats */
     if (tlb_stats.emulated == e0)
         return "I/O access did not fault";
     if (rd32(0x08000000u) != 0xEA00002Eu)
@@ -328,6 +345,7 @@ const char *tlb_selftest(void) {
     /* VRAM write tracking */
     gba_vram_take_dirty();
     wr16(0x06000010u, 0x1234u);
+    __asm__ volatile("" ::: "memory");
     uint32_t v = *(volatile uint16_t *)((uint8_t *)gba_mem.vram + (0x10u ^ GBA_HX));
     if (v != 0x1234u || !(gba_vram_dirty & 1u)) {
         gba_vram_track_ok = 0;

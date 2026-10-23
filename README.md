@@ -36,10 +36,29 @@ truly wider and taller than the GBA's 240×160: more of the authored world
 is visible, and the HUD sits at the screen edges. Title, menu and status
 screens are drawn at their native size, centred.
 
+C-Up toggles a performance overlay showing fps, game time and draw time.
+
 ## Requirements
 
-- An N64 with an Expansion Pak (8 MB), or an accurate emulator such as ares.
-- A flash cart that supports 32 KB SRAM saves.
+- An N64 with an Expansion Pak (8 MB), an Analogue 3D, or an accurate
+  emulator such as ares.
+- A flash cart that supports 32 KB SRAM saves. SummerCart64 reads the save
+  type from the ROM header.
+
+### Analogue 3D
+
+- Run the ROM from a flash cart. SummerCart64 is known to work well on the
+  Analogue 3D. EverDrive carts need current cart and console firmware.
+- The Analogue 3D's built-in Expansion Pak can be switched off per game.
+  If the ROM says the Expansion Pak is missing, turn it on in the game's
+  settings in the Library.
+- At boot the ROM checks the CPU features the port relies on: TLB
+  mappings and mirrors, unaligned and I/O access emulation, and ROM
+  paging. If one behaves differently, the ROM shows which one instead of a
+  black screen.
+- If VRAM write tracking (TLB modification exceptions) does not work, the
+  renderer re-uploads all of VRAM every frame. This is slower, but the
+  game still runs.
 
 ## Building
 
@@ -72,6 +91,11 @@ Then:
    ```bash
    make -C platform/n64 GEN=$PWD/gen/c BASEROM=$PWD/baserom.gba
    ```
+
+   The ROM contains your GBA dump, so don't share it. From Git Bash on
+   Windows, `tools/build_release.sh OUT.z64` runs the same build through
+   WSL. It also removes any leftover test script, which would otherwise
+   boot the ROM in test mode.
 
 A PC test build (`platform/host/build.sh`) runs the same recompiled code
 headless. It writes screenshots, audio and saves for validation. See
