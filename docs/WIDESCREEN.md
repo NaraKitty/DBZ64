@@ -181,9 +181,12 @@ The class comes from the object's vtable.
      the HUD strip, and joining them moved the HUD 32 px right while the window
      opened and closed. The centred window now covers only part of the HUD,
      which it hides completely on the GBA.
-3. Each cluster snaps by the centre of its box: to the left/centre/right third and the
-   top/middle/bottom third of the 320x240 screen, with a `ws_hud_inset` (8 px) margin for
-   CRT overscan.
+3. Each cluster keeps its place in the free space. A cluster at fraction t of the native
+   screen's free space (240 or 160 minus its size) goes to fraction t of the 320x240
+   screen's free space, inside a `ws_hud_inset` (8 px) margin for CRT overscan.
+   - What sits at an edge stays at that edge, and what is centred stays centred.
+   - Anything moving between them moves smoothly. The dialogue box slides between
+     bottom and top with R/L; the earlier rule (snap to a third) made it jump mid-slide.
 
 The HUD lands in the top-left corner. Dialogue boxes and banners land at bottom-centre, or
 top-centre when the game puts them at the top.

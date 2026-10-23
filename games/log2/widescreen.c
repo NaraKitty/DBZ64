@@ -701,6 +701,20 @@ static const uint8_t obj_dim[3][4][2] = {
 static int16_t pos_x[128], pos_y[128];
 static uint8_t pos_ok[128];
 
+/* Offset that moves a screen-space cluster at native position p (size
+ * 'size', on a native axis of 'native' pixels) into a view axis of 'view'
+ * pixels: it keeps the same fraction of the free space, inside 'inset'.
+ * Clusters at an edge stay at that edge and centred ones stay centred,
+ * and anything moving between them moves continuously (the dialogue box
+ * slides between bottom and top with R/L; a top/middle/bottom choice made
+ * it jump mid-slide). */
+static int anchor(int p, int size, int native, int view, int inset) {
+    int free_n = native - size, free_v = view - 2 * inset - size;
+    if (free_n <= 0 || free_v <= 0)
+        return (view - size) / 2 - p;
+    return inset + (p * free_v + free_n / 2) / free_n - p;
+}
+
 static void compute_obj_positions(void) {
     int cls[128], bw[128], bh[128], gx[128], gy[128];
     uint32_t owner[128];
@@ -756,8 +770,9 @@ static void compute_obj_positions(void) {
         return;
 
     /* Screen-space objects: hide what the GBA would not show, then group
-     * touching boxes (and the entries of one object) into clusters and snap
-     * each cluster to the nearest edge / centre of the 320x240 screen. */
+     * touching boxes (and the entries of one object) into clusters and move
+     * each cluster to the same place in the 320x240 screen's free space
+     * (anchor()). */
     int idx[128], n = 0;
     for (int i = 0; i < 128; i++) {
         if (cls[i] != CLS_SCREEN) continue;
@@ -800,13 +815,12 @@ static void compute_obj_positions(void) {
     }
     for (int k = 0; k < n; k++) {
         int r = root[k], i = idx[k];
-        /* the cluster box, clipped to the native screen, picks the anchor:
-         * left / centre / right third, top / middle / bottom third */
+        /* the cluster box, clipped to the native screen, keeps its place in
+         * the free space: see anchor() */
         int x0 = imax(bx0[r], 0), x1 = imin(bx1[r], 240);
         int y0 = imax(by0[r], 0), y1 = imin(by1[r], 160);
-        int cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
-        int fx = cx < 80 ? ws_hud_inset : cx >= 160 ? 80 - ws_hud_inset : 40;
-        int fy = cy < 54 ? ws_hud_inset : cy >= 107 ? 80 - ws_hud_inset : 40;
+        int fx = anchor(x0, x1 - x0, 240, 320, ws_hud_inset);
+        int fy = anchor(y0, y1 - y0, 160, 240, ws_hud_inset);
         /* framebuffer = native + f; screen coordinate = framebuffer - (-OX) */
         pos_x[i] = (int16_t)(gx[i] + fx + OX);
         pos_y[i] = (int16_t)(gy[i] + fy + OY);
