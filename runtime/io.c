@@ -252,9 +252,12 @@ static int in_irq;
 
 static void run_handler(uint32_t handler) {
     gba_cpu_t saved = cpu;
-    /* System mode on the interrupted (user) stack, like the dispatcher */
+    /* System mode on the interrupted (user) stack, like the dispatcher.  The
+     * dispatcher passes its continuation in r4 and the sound handler returns
+     * with 'bx r4'; that continuation unwinds a frame we never build, so r4
+     * gets the same return sentinel as lr: either way the handler is done. */
     cpu.r[0] = handler;
-    cpu.r[4] = IRQ_RET_R4;
+    cpu.r[4] = IRQ_RET_LR;
     cpu.r[14] = IRQ_RET_LR;
     gba_call(handler);
     cpu = saved;
