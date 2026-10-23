@@ -67,7 +67,8 @@ typedef struct gba_mem {
     uint32_t bios[0x4000 / 4];
 } gba_mem_t;
 
-extern gba_mem_t gba_mem __attribute__((aligned(64)));
+/* alignment comes from the type (64 bytes, or the TLB page sizes) */
+extern gba_mem_t gba_mem;
 
 /* page tables, 64K entries each (addr bits 27..12) */
 extern uintptr_t gba_rd_page[0x10000];

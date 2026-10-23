@@ -91,6 +91,11 @@ static uint64_t timer_next_overflow(int i) {
 
 /* ------------------------------------------------------------ DMA */
 
+static inline int slow_region(uint32_t a) {
+    uint32_t r = (a >> 24) & 0xF;
+    return r == 0x0 || r == 0x1 || r == 0x4 || r == 0xD || r >= 0xE;
+}
+
 static void dma_transfer(int ch) {
     dma_t *d = &dma[ch];
     uint32_t cntoff = REG_DMA0SAD + 12 * ch + 10;
@@ -139,14 +144,24 @@ static void dma_transfer(int ch) {
         s += sinc * n;
         t += dinc * n;
     } else if (word) {
+        /* the slow paths handle I/O, EEPROM and unmapped regions directly
+         * (cheaper than faulting on every unit in TLB builds) */
+        int slow = slow_region(s) || slow_region(t);
         for (uint32_t k = 0; k < n; k++) {
-            wr32(t, rd32(s));
+            if (slow)
+                gba_wr32_slow(t, gba_rd32_slow(s));
+            else
+                wr32(t, rd32(s));
             s += sinc;
             t += dinc;
         }
     } else {
+        int slow = slow_region(s) || slow_region(t);
         for (uint32_t k = 0; k < n; k++) {
-            wr16(t, rd16(s));
+            if (slow)
+                gba_wr16_slow(t, gba_rd16_slow(s));
+            else
+                wr16(t, rd16(s));
             s += sinc;
             t += dinc;
         }

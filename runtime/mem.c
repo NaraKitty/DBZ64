@@ -6,7 +6,7 @@
 #include "io.h"
 #include "rom.h"
 
-gba_mem_t gba_mem __attribute__((aligned(64)));
+gba_mem_t gba_mem;
 uintptr_t gba_rd_page[0x10000];
 uintptr_t gba_wr_page[0x10000];
 

@@ -209,9 +209,17 @@ static int emulate_access(reg_block_t *r, uint32_t va) {
     return 1;
 }
 
+int tlb_trace = 64;   /* log the first faults (debugging aid) */
+
 static void tlb_exception(exception_t *ex) {
     reg_block_t *r = ex->regs;
     uint32_t va = (uint32_t)C0_BADVADDR();
+    if (tlb_trace > 0) {
+        tlb_trace--;
+        uint32_t at = (uint32_t)r->epc + ((r->cr & C0_CAUSE_BD) ? 4 : 0);
+        debugf("[tlb] code %d va %08lX epc %08lX insn %08lX\n", (int)ex->code,
+               (unsigned long)va, (unsigned long)r->epc, (unsigned long)*(uint32_t *)(uintptr_t)at);
+    }
     switch (ex->code) {
     case EXCEPTION_CODE_TLB_MODIFICATION:
         if (va >= 0x06000000u && va < 0x06020000u) {
@@ -244,6 +252,10 @@ static void tlb_exception(exception_t *ex) {
 /* ------------------------------------------------------------ setup */
 
 void tlb_init(void) {
+    if ((phys(gba_mem.ewram) & 0x3FFFFu) || (phys(gba_mem.iwram) & 0x3FFFu) ||
+        (phys(gba_mem.vram) & 0x3FFFu) || (phys(gba_mem.pal) & 0x1FFFu) || (phys(gba_mem.oam) & 0x1FFFu))
+        gba_panic("guest memory is not aligned for the TLB (gba_mem at %08lX)",
+                  (unsigned long)phys(&gba_mem));
     disable_interrupts();
     for (int i = 0; i < 32; i++)
         tlb_write(i, 0x0F000000u + (uint32_t)i * 0x8000u, PM_16K, 0, 0);
