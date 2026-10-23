@@ -6,8 +6,12 @@
  *
  *   dbz --rom baserom.gba [--frames N] [--shot F,F,..] [--every K]
  *       [--out DIR] [--keys "F-F:KEY+KEY;F:KEY"] [--save file] [--wav file]
+ *       [--dump-state F,..]
  *       [--ws] [--ws-native] [--ws-debug] [--ws-off] [--ws-nodespawn]
  *       [--ws-force-decode] [--ws-decode-test]
+ *
+ * The build runs one game (GAME=log2|buu, games/$GAME/game.h); --rom must be
+ * that game's dump.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,6 +24,7 @@
 #include "io.h"
 #include "rom.h"
 #include "ppu_soft.h"
+#include "game.h"
 
 void gba_boot(void);
 extern uint32_t gba_miss_log[256];
@@ -73,6 +78,12 @@ static void load_rom(const char *path) {
     uint8_t *b = (uint8_t *)rom_words;
     if (fread(b, 1, rom_size, f) != rom_size) { perror("read"); exit(1); }
     fclose(f);
+    /* this build runs one game (GAME=... at build time) */
+    if (rom_size < 0xC0 || memcmp(b + 0xAC, GAME_CODE, 4)) {
+        fprintf(stderr, "%s: not %s (game code %.4s, need %s)\n", path, GAME_TITLE,
+                rom_size >= 0xC0 ? (const char *)b + 0xAC : "?", GAME_CODE);
+        exit(1);
+    }
 #if GBA_BIG_ENDIAN
     for (uint32_t i = 0; i < rom_size / 4; i++)
         rom_words[i] = __builtin_bswap32(rom_words[i]);
@@ -269,7 +280,7 @@ static void ws_print_line(const char *s) {
 }
 
 /* --ws-decode-test: decode every authored map chunk of every field layer
- * resource (factory 0x080056A1) and write "desc crc ok" lines to
+ * resource (factory GAME_WS_RES_FACTORY) and write "desc crc ok" lines to
  * OUT/decode_test.txt (compared against an independent decoder offline) */
 static int ws_decode_test;
 
@@ -282,7 +293,7 @@ static void ws_run_decode_test(void) {
     static uint8_t buf[0x800];
     int n = 0, bad = 0;
     for (uint32_t off = 0; off + 0x18 <= rom_size; off += 4) {
-        if (rom_words[off / 4] != 0x080056A1u)
+        if (rom_words[off / 4] != GAME_WS_RES_FACTORY)
             continue;
         uint32_t res = 0x08000000u + off;
         uint32_t cr = rd32(res + 0x14);
@@ -352,6 +363,7 @@ static void dump_state(const char *path) {
     }
     fclose(f);
 }
+
 static volatile int frames_since_alarm;
 static time_t t_start;
 

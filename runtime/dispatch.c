@@ -7,10 +7,11 @@
 #include "gba.h"
 #include "dispatch.h"
 #include "interp.h"
+#include "game.h"
 
 gba_cpu_t cpu;
 
-#define HASH_BITS 13
+#define HASH_BITS GAME_DISPATCH_HASH_BITS
 #define HASH_SIZE (1u << HASH_BITS)
 
 static struct { uint32_t key; gba_func_t fn; } htab[HASH_SIZE];

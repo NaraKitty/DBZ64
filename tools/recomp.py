@@ -840,9 +840,32 @@ class FuncGen:
         return fmt(i).replace('*/', '* /')
 
 
+def game_toml(argv):
+    """--config PATH, or --game NAME for games/NAME/game.toml (default log2)."""
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(repo, 'games', 'log2', 'game.toml')
+    for k, a in enumerate(argv):
+        if a == '--game' and k + 1 < len(argv):
+            path = os.path.join(repo, 'games', argv[k + 1], 'game.toml')
+        elif a == '--config' and k + 1 < len(argv):
+            path = argv[k + 1]
+    return path
+
+
 def main():
-    rom_path, fjson, outdir = sys.argv[1:4]
-    shards = int(sys.argv[4]) if len(sys.argv) > 4 else 16
+    """recomp.py ROM functions.json OUTDIR [SHARDS] [--game NAME | --config TOML] [--dump-abi]"""
+    args, k = [], 1
+    while k < len(sys.argv):
+        if sys.argv[k] in ('--game', '--config'):
+            k += 2
+            continue
+        if not sys.argv[k].startswith('--'):
+            args.append(sys.argv[k])
+        k += 1
+    rom_path, fjson, outdir = args[:3]
+    shards = int(args[3]) if len(args) > 3 else 16
+    import tomllib
+    cfg = tomllib.load(open(game_toml(sys.argv), 'rb'))
     data = json.load(open(fjson))
     rom = Rom(rom_path)
     cs = CodeSpace(rom)
@@ -858,14 +881,12 @@ def main():
         gens[(f['addr'], f['thumb'])] = g
     # Address-taken functions are the possible targets of indirect calls.  The
     # IRQ code is only entered by the runtime (with a full context save), so it
-    # does not constrain the indirect-call summary.
-    runtime_only = {0x03000824, 0x03000934, 0x03000798, 0x03000950}
+    # does not constrain the indirect-call summary (game.toml [recomp]).
+    runtime_only = set(cfg.get('recomp', {}).get('runtime_only', []))
     taken = set()
     for f in funcs:
         if f.get('origin') not in ('call', 'tail', 'reset', None) and f['addr'] not in runtime_only:
             taken.add((f['addr'], f['thumb']))
-    import tomllib
-    cfg = tomllib.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'game.toml'), 'rb'))
     noreturn = {(e['addr'], e.get('mode', 'thumb') == 'thumb') for e in cfg.get('noreturn', [])}
     for e in cfg.get('override_load', []):
         OVERRIDE_LOAD[e['pc']] = e['func']

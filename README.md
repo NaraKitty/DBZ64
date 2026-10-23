@@ -77,19 +77,19 @@ Then:
 1. **Find the game's code** (the ROM is only read):
 
    ```bash
-   python3 tools/analyze.py baserom.gba tools/game.toml gen/analysis
+   python3 tools/analyze.py baserom.gba games/log2/game.toml gen/analysis
    ```
 
 2. **Generate the C code.** It is derived from your ROM, so keep it local:
 
    ```bash
-   python3 tools/recomp.py baserom.gba gen/analysis/functions.json gen/c 24
+   python3 tools/recomp.py baserom.gba gen/analysis/functions.json gen/c 24 --game log2
    ```
 
 3. **Build the N64 ROM**, which writes `platform/n64/dbz.z64`:
 
    ```bash
-   make -C platform/n64 GEN=$PWD/gen/c BASEROM=$PWD/baserom.gba
+   make -C platform/n64 GAME=log2 GEN=$PWD/gen/c BASEROM=$PWD/baserom.gba
    ```
 
    The ROM contains your GBA dump, so don't share it. From Git Bash on
@@ -97,9 +97,22 @@ Then:
    WSL. It also removes any leftover test script, which would otherwise
    boot the ROM in test mode.
 
-A PC test build (`platform/host/build.sh`) runs the same recompiled code
-headless. It writes screenshots, audio and saves for validation. See
-`docs/ARCHITECTURE.md` for how everything fits together.
+A PC test build (`GAME=log2 platform/host/build.sh GEN OUT`) runs the same
+recompiled code headless. It writes screenshots, audio and saves for
+validation. See `docs/ARCHITECTURE.md` for how everything fits together.
+
+### Games
+
+The framework is shared by Webfoot's GBA *Dragon Ball Z* games. Everything
+specific to one game lives in `games/<game>/`: `game.toml` (code discovery),
+`game.h` (what the runtime needs: IRQ dispatcher, save magic, ROM identity,
+N64 title) and the game's own C sources. `GAME=` (default `log2`) selects the
+game for the build scripts and the N64 Makefile; `tools/recomp.py` takes
+`--game`.
+
+| `GAME` | Game | Dump (SHA-1) | Status |
+|---|---|---|---|
+| `log2` | The Legacy of Goku II (USA, `ALFE`) | `18e0715dec419f3501c301511530d2edcd590f8b` | complete |
 
 ## Credits
 

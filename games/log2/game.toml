@@ -1,16 +1,38 @@
 # Dragon Ball Z: The Legacy of Goku II (USA, ALFE, rev 0)
 # SHA-1 18e0715dec419f3501c301511530d2edcd590f8b
 #
-# Discovery metadata for tools/analyze.py.  Function entries are found by the
-# analyzer itself (relative vtables, pointer scans, gap filling); only facts
-# it cannot infer are listed here.  Addresses verified by disassembly and
-# cross-checked with github.com/mstan/DragonBallZLegacyofGokuIIRecomp.
+# Discovery metadata for tools/analyze.py and tools/recomp.py.  Function
+# entries are found by the analyzer itself (relative vtables, pointer scans,
+# gap filling); only facts it cannot infer are listed here.  Addresses
+# verified by disassembly and cross-checked with
+# github.com/mstan/DragonBallZLegacyofGokuIIRecomp.  The runtime's view of
+# the game (IRQ dispatcher, save magic, ...) is in game.h next to this file.
 
 [program]
 id = "ALFE"
 load_address = 0x08000000
 size = 0x00800000
 entry_pc = 0x08000000
+# executable scan window (code discovery, gap fill, pointer harvest)
+aot_scan_start = 0x080000C0
+aot_scan_end = 0x08030000
+
+# Section layout (tools/analyze.py)
+[layout]
+text = [0x08000158, 0x08023588]
+ctors = [0x08023588, 0x08023690]       # 66 entries, runner 0x08021D74
+dtors = [0x08023690, 0x0802369C]       # 3 entries, runner 0x08021D48
+veneers = [0x0802369C, 0x08023720]
+rodata = [0x08023720, 0x08026044]      # relative vtables + ARM this-adjust thunks
+text2 = 0x08026044
+iwram_code = [0x03000000, 0x03000C04]  # ARM code + pools of the IWRAM image
+iwram_data = [0x03000C04, 0x03000E1C]  # its .data
+
+# IWRAM code entered only by the runtime's native IRQ dispatcher (game.h):
+# the dispatcher, its continuation, the sound DMA2 handler and the 'bx r4'
+# return trampoline.  They are not address-taken code for the ABI summaries.
+[recomp]
+runtime_only = [0x03000824, 0x03000934, 0x03000798, 0x03000950]
 
 # crt0 copies the ARM support/IRQ image into IWRAM
 [[code_copy]]
@@ -104,8 +126,9 @@ mode = "arm"
 func = "native_clip"
 
 # ---------------------------------------------------------------- 320x240 view
-# runtime/widescreen.c, docs/WIDESCREEN.md.  Every PC below was checked by
-# disassembly to be the LDR of the camera-rect field named by the function.
+# widescreen.c (this directory), docs/WIDESCREEN.md.  Every PC below was
+# checked by disassembly to be the LDR of the camera-rect field named by the
+# function.
 # Camera rect at 0x0300109C: L, T, R=L+240, B=T+160.
 
 # Render culling (sprite class isVisible): all four sides widen to the view.

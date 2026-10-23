@@ -3,21 +3,30 @@
 # Bash on Windows).  The test script is read by platform/n64/main.c.
 #   bash tools/run_n64.sh NAME TIMEOUT_S TEST_SCRIPT_FILE [make args...]
 # Environment:
+#   GAME     log2 (default) or buu: games/$GAME
 #   BD   build directory name under /d/dbz-n64/build (default n64t)
 #   WSLREPO  repository path as seen from WSL (default ~/dbzn64; use a
 #            worktree like /mnt/d/dbz-n64/wt-lead to build committed code)
-#   GENDIR   generated C directory (WSL path, default /mnt/d/dbz-n64/gen/c)
-# Output: /d/dbz-n64/runs/NAME/{ares.log,shot_fNNNNN.png}
+#   GENDIR   generated C directory (WSL path, default /mnt/d/dbz-n64/gen/c,
+#            /mnt/d/dbz-n64/$GAME/gen/c for games other than log2)
+# Output: /d/dbz-n64/runs/NAME/{ares.log,shot_fNNNNN.png} (other games:
+# /d/dbz-n64/$GAME/runs/NAME)
 set -e
 NAME="$1"; T="$2"; SCRIPT="$3"
 shift 3 || true
-RUN="/d/dbz-n64/runs/$NAME"
+GAME="${GAME:-log2}"
+if [ "$GAME" = log2 ]; then
+    RUN="/d/dbz-n64/runs/$NAME"
+    GENDIR="${GENDIR:-/mnt/d/dbz-n64/gen/c}"
+else
+    RUN="/d/dbz-n64/$GAME/runs/$NAME"
+    GENDIR="${GENDIR:-/mnt/d/dbz-n64/$GAME/gen/c}"
+fi
 BD="${BD:-n64t}"
 WSLREPO="${WSLREPO:-/home/nara/dbzn64}"
-GENDIR="${GENDIR:-/mnt/d/dbz-n64/gen/c}"
 mkdir -p "$RUN" /d/dbz-n64/build/$BD/filesystem
 cp "$SCRIPT" /d/dbz-n64/build/$BD/filesystem/test.txt
-MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu -- bash -c "export N64_INST=/opt/libdragon; cd $WSLREPO/platform/n64 && touch /mnt/d/dbz-n64/build/$BD/filesystem/test.txt && make -j12 REPO=$WSLREPO GEN=$GENDIR BUILD_DIR=/mnt/d/dbz-n64/build/$BD $* > /mnt/d/dbz-n64/build/n64_make_$BD.log 2>&1 || { grep -E 'error' /mnt/d/dbz-n64/build/n64_make_$BD.log | head; exit 1; }; cp dbz.z64 /mnt/d/dbz-n64/build/$BD/dbz_test.z64"
+MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu -- bash -c "export N64_INST=/opt/libdragon; cd $WSLREPO/platform/n64 && touch /mnt/d/dbz-n64/build/$BD/filesystem/test.txt && make -j12 REPO=$WSLREPO GAME=$GAME GEN=$GENDIR BUILD_DIR=/mnt/d/dbz-n64/build/$BD $* > /mnt/d/dbz-n64/build/n64_make_$BD.log 2>&1 || { grep -E 'error' /mnt/d/dbz-n64/build/n64_make_$BD.log | head; exit 1; }; cp dbz.z64 /mnt/d/dbz-n64/build/$BD/dbz_test.z64"
 rm -f /d/dbz-n64/build/$BD/filesystem/test.txt
 cd "/d/Games/ARES N64 EMULATOR"
 ./ares.exe --settings-file 'D:\dbz-n64\scratch\n64platform\ares_settings.bml' \

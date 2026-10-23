@@ -84,7 +84,7 @@ void gba_io_write8(uint32_t off, uint32_t v);
 int gba_jump(uint32_t target);
 void gba_exc_return(void);                /* movs pc / ldm ^ with pc */
 void gba_undefined(uint32_t pc, uint32_t raw);
-/* entered a function the recompiler assumed unreachable (see tools/game.toml) */
+/* entered a function the recompiler assumed unreachable (games/<game>/game.toml [[assume_unreachable]]) */
 void gba_unexpected(uint32_t addr);
 void gba_msr(uint32_t value, uint32_t mask, int spsr);
 uint32_t gba_mrs(int spsr);

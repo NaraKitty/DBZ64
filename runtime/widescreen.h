@@ -52,7 +52,7 @@
  *     ws_get_view((ws_view_t *)&gba_view);
  *
  * Culling.  The game only emits sprites inside its 240x160 camera rectangle.
- * tools/game.toml routes the loads of the camera bounds at the render-cull and
+ * games/<game>/game.toml routes the loads of the camera bounds at the render-cull and
  * despawn sites through ws_cull_* / ws_despawn_*, which widen them to the
  * 320x240 view.  The widening is active only while ws_enabled is set, the
  * scene is a field map and the platform asked for the view with ws_get_view()
@@ -101,7 +101,7 @@ int ws_field_view_active(void);
  * renderers that cache bg_entry results must drop them then */
 uint32_t ws_map_generation(void);
 
-/* ---- generated-code hooks (tools/game.toml) ---- */
+/* ---- generated-code hooks (games/<game>/game.toml) ---- */
 
 /* [[override_load]]: camera bound loaded at a render-cull / despawn site */
 uint32_t ws_cull_left(uint32_t v);

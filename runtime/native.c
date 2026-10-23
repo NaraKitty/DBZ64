@@ -1,7 +1,9 @@
 /*
- * native.c - native C replacements for hot hand-written guest routines.
+ * native.c - native C replacements for hot hand-written guest routines of
+ * the Webfoot engine (the IWRAM sound mixer is byte-identical in both games;
+ * only its address differs).
  *
- * tools/game.toml [[native]] makes the recompiler emit a call to these
+ * games/<game>/game.toml [[native]] makes the recompiler emit a call to these
  * instead of translating the guest code.  Each one must produce exactly the
  * guest routine's results (memory and the registers its callers may read);
  * the host harness checks this by comparing audio output with and without
@@ -9,8 +11,8 @@
  */
 #include "gba.h"
 
-/* 0x03000520 (ARM, IWRAM): mix n samples of one voice into the 32-bit
- * accumulator.  r0 = voice {pos, step, data, vol}, r1 = acc, r2 = n.
+/* mix_voice (ARM, IWRAM; LoG2 0x03000520, Buu's Fury 0x03000868): mix n
+ * samples of one voice into the 32-bit accumulator.  r0 = voice {pos, step, data, vol}, r1 = acc, r2 = n.
  * Positions are 14-bit fixed point, samples are nearest-neighbour signed
  * bytes, and vol packs the left/right volumes in one word so a single
  * multiply-accumulate mixes both channels (the halves may carry into each
@@ -51,9 +53,10 @@ static inline uint32_t clamp8(int32_t x) {
     return (uint32_t)(x > 127 ? 127 : x < -128 ? -128 : x) & 0xFF;
 }
 
-/* 0x03000704 (ARM, IWRAM): convert n accumulated samples (n even) to the
- * two signed 8-bit FIFO rings, clearing the accumulator.  r0 = left ring
- * (low halves), r1 = right ring (high halves), r2 = acc, r3 = n. */
+/* clip (ARM, IWRAM; LoG2 0x03000704, Buu's Fury 0x03000A4C): convert n
+ * accumulated samples (n even) to the two signed 8-bit FIFO rings, clearing
+ * the accumulator.  r0 = left ring (low halves), r1 = right ring (high
+ * halves), r2 = acc, r3 = n. */
 void native_clip(void) {
     uint32_t ra = cpu.r[0], rb = cpu.r[1], acc = cpu.r[2];
     int32_t n = (int32_t)cpu.r[3];

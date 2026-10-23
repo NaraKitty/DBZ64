@@ -12,14 +12,35 @@ The recompiler regenerates the C code from the user's own ROM.
 
 ```
 baserom.gba ──tools/analyze.py──▶ functions.json ──tools/recomp.py──▶ gen/*.c
-                                                                       │
-runtime/*.c (GBA hardware model) + platform/{host,n64}/*.c ◀───────────┘
+              games/<game>/game.toml ──┘                                │
+runtime/*.c (GBA hardware model) + games/<game>/*.c                     │
+  + platform/{host,n64}/*.c ◀───────────────────────────────────────────┘
         │
         ├─ host build (WSL gcc): headless PNG/WAV harness for validation
         └─ N64 build (libdragon): dbz.z64
 ```
 
+### Games (`games/<game>/`)
+The tools, runtime and platforms are shared by Webfoot's GBA *Dragon Ball Z*
+games (the same engine and toolchain). Each game directory holds:
+- `game.toml`: code discovery and code generation facts for the tools: the
+  section `[layout]`, the crt0 `[[code_copy]]`, jump tables, extra entries,
+  `noreturn`/`assume_unreachable` library functions, `[[native]]`
+  replacements, the IWRAM IRQ code only the runtime enters (`[recomp]`), and
+  the game's hook sites.
+- `game.h`: what the runtime and the platforms need: the IRQ dispatcher's
+  handler table, flags word, return sentinel and test order, the ROM identity
+  (game code, SHA-1), the N64 cartridge title and SRAM save magic.
+- C sources compiled into that game's build (for LoG2, the 320×240 field view
+  `widescreen.c`).
+
+`GAME=log2|buu` selects the game in `platform/host/build.sh`, the N64
+Makefile and the run scripts; `tools/recomp.py --game NAME` and
+`tools/mkrom.py --game NAME` read the same directory. Builds of different
+games need different output directories.
+
 ### Code discovery (`tools/analyze.py`)
+For LoG2 (`games/log2/game.toml`):
 - Recursive descent from crt0, AgbMain (0x08000158) and the constructor table
   at 0x08023588.
 - Seeds from the reference recomp's `game.toml` (753 verified function entries
@@ -73,8 +94,9 @@ runtime/*.c (GBA hardware model) + platform/{host,n64}/*.c ◀──────
   - an audio FIFO block every 16 samples (DMA2 IRQ)
   - HBlank lines, only while the Mode-7 scene's HBlank IRQ is enabled
   - VBlank at line 160: render and present first, then raise the VBlank IRQ
-- The IWRAM IRQ dispatcher at 0x03000824 is replaced by a native version with
-  the same priority and IE/IF/flag semantics. Handlers run as recompiled code.
+- The game's IWRAM IRQ dispatcher (LoG2 0x03000824; `GAME_IRQ_*` in
+  `game.h`) is replaced by a native version with the same priority and
+  IE/IF/flag semantics. Handlers run as recompiled code.
 - The BIOS is not executed. SWI 0/2/3/6 are native.
 
 **Audio:**

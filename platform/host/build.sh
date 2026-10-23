@@ -1,17 +1,33 @@
 #!/bin/bash
 # Build the host test harness in WSL.
-#   bash platform/host/build.sh [gen_dir] [out_dir]
+#   [GAME=log2|buu] bash platform/host/build.sh [gen_dir] [out_dir]
+# The game's directory (games/$GAME: game.h and its C sources) is compiled in.
+# Default gen/out dirs: LoG2 /mnt/d/dbz-n64/{gen/c,build/host}, other games
+# /mnt/d/dbz-n64/$GAME/{gen/c,build/host}.
 set -e
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
-GEN="${1:-/mnt/d/dbz-n64/gen/c}"
-OUT="${2:-/mnt/d/dbz-n64/build/host}"
+GAME="${GAME:-log2}"
+GAMEDIR="$REPO/games/$GAME"
+[ -f "$GAMEDIR/game.h" ] || { echo "unknown game '$GAME' (no $GAMEDIR/game.h)"; exit 1; }
+if [ "$GAME" = log2 ]; then
+    GEN="${1:-/mnt/d/dbz-n64/gen/c}"
+    OUT="${2:-/mnt/d/dbz-n64/build/host}"
+else
+    GEN="${1:-/mnt/d/dbz-n64/$GAME/gen/c}"
+    OUT="${2:-/mnt/d/dbz-n64/$GAME/build/host}"
+fi
 mkdir -p "$OUT/obj"
 CFLAGS="-O2 -g -std=gnu11 -Wall -Wno-unused-label -Wno-unused-variable -Wno-unused-but-set-variable -fno-strict-aliasing ${EXTRA_CFLAGS}"
-INC="-I$REPO/runtime -I$GEN"
+INC="-I$REPO/runtime -I$GAMEDIR -I$GEN"
 SRCS="$REPO/runtime/mem.c $REPO/runtime/io.c $REPO/runtime/bios.c $REPO/runtime/dispatch.c \
-      $REPO/runtime/runtime.c $REPO/runtime/interp.c $REPO/runtime/native.c $REPO/runtime/ppu_soft.c $REPO/runtime/widescreen.c \
-      $REPO/platform/host/main.c"
+      $REPO/runtime/runtime.c $REPO/runtime/interp.c $REPO/runtime/native.c $REPO/runtime/ppu_soft.c \
+      $GAMEDIR/*.c $REPO/platform/host/main.c"
 OBJS=""
+# objects of one game must not be reused for another
+if [ "$(cat "$OUT/obj/game.txt" 2>/dev/null)" != "$GAME" ]; then
+    FORCE=1
+    echo "$GAME" > "$OUT/obj/game.txt"
+fi
 compile() {
     local src="$1" obj="$2"
     if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ] || [ -n "$FORCE" ]; then
@@ -30,4 +46,4 @@ for s in "$GEN"/gen_*.c; do
 done
 wait
 gcc $CFLAGS -o "$OUT/dbz" $OBJS
-echo "built $OUT/dbz"
+echo "built $OUT/dbz ($GAME)"

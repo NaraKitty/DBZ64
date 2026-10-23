@@ -27,6 +27,7 @@
 #include "tlb.h"
 #include "prof.h"
 #include "ppu_soft.h"
+#include "game.h"
 
 void gba_boot(void);
 
@@ -209,8 +210,9 @@ static void audio_flush(void) {
 
 /* ------------------------------------------------------------ saves */
 
-/* SRAM layout: 16-byte header {"DBZ2", version, crc32, 0} + 8KB EEPROM
- * image, mirrored at 0x4000 so a power cut during a write keeps one copy. */
+/* SRAM layout: 16-byte header {GAME_SRAM_MAGIC, version, crc32, 0} + 8KB
+ * EEPROM image, mirrored at 0x4000 so a power cut during a write keeps one
+ * copy.  The magic is per game, so one game never loads the other's save. */
 static int save_dirty;
 
 static uint32_t crc32_buf(const uint8_t *p, size_t n) {
@@ -229,7 +231,7 @@ static int load_copy(uint32_t off) {
     uint32_t ver, crc;
     memcpy(&ver, buf + 4, 4);
     memcpy(&crc, buf + 8, 4);
-    if (memcmp(buf, "DBZ2", 4) || ver != 1 || crc != crc32_buf(buf + 16, sizeof gba_eeprom_data))
+    if (memcmp(buf, GAME_SRAM_MAGIC, 4) || ver != 1 || crc != crc32_buf(buf + 16, sizeof gba_eeprom_data))
         return 0;
     memcpy(gba_eeprom_data, buf + 16, sizeof gba_eeprom_data);
     return 1;
@@ -247,7 +249,7 @@ static void flush_save(void) {
         return;
     save_dirty = 0;
     uint32_t ver = 1, crc = crc32_buf(gba_eeprom_data, sizeof gba_eeprom_data), z = 0;
-    memcpy(buf, "DBZ2", 4);
+    memcpy(buf, GAME_SRAM_MAGIC, 4);
     memcpy(buf + 4, &ver, 4);
     memcpy(buf + 8, &crc, 4);
     memcpy(buf + 12, &z, 4);
@@ -447,7 +449,7 @@ void plat_fatal(const char *msg) {
         surface_t *d = display_get();
         graphics_fill_screen(d, graphics_make_color(0, 0, 64, 255));
         graphics_set_color(graphics_make_color(255, 255, 255, 255), 0);
-        graphics_draw_text(d, 16, 16, "Dragon Ball Z: The Legacy of Goku II");
+        graphics_draw_text(d, 16, 16, GAME_TITLE);
         graphics_draw_text(d, 16, 28, "N64 port - cannot continue:");
         /* wrap the message at 36 columns */
         char line[40];
@@ -488,7 +490,7 @@ int main(void) {
         plat_fatal("The ROM's filesystem (with the GBA game data) was not found. "
                    "Rebuild the ROM with your own GBA dump.");
     sram_init();
-    debugf("DBZ LoG2 N64: memory %d bytes, audio %d Hz\n", get_memory_size(), audio_get_frequency());
+    debugf(GAME_SHORT_TITLE " N64: memory %d bytes, audio %d Hz\n", get_memory_size(), audio_get_frequency());
     load_test_script();
     load_save();
     rom_cache_init(ROM_CACHE_BYTES);
