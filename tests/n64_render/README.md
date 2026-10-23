@@ -99,3 +99,15 @@ loads 8 bytes/clk, 24 clocks per rectangle and per load, at 62.5 MHz.
 | `synth_semi_dark_bd` | the same with darken and the backdrop as 1st + 2nd target |
 | `synth_bgedge` | text BG tiles past the end of BG VRAM, a 512x512 map reaching into OBJ VRAM, 16-bit scrolls |
 | `synth_obj4_many` | 48 4bpp 64x64 OBJs (the per-frame scratch tile area fills several times) |
+| `synth_mosaic_bg` | text BG mosaic (4bpp banks, 8bpp, 512-wide maps, 16-bit scrolls) with mosaic OBJs |
+| `synth_mosaic_obj` | OBJ mosaic: regular (flips, 4bpp/8bpp) and affine OBJs, partly off-screen |
+| `synth_mosaic_mode7` | mode 1 BG2 with per-line parameters and BG1 per-line scroll, both with mosaic |
+| `synth_mosaic_mode4`, `synth_mosaic_mode3` | bitmap modes with BG2 mosaic (scaled mode 4, mode 3 with darken) |
+| `synth_objprio` | the OBJ layer's transparent-texel priority rule: worse-priority OBJs under later better-priority ones, semi-transparent and affine ones, with alpha blending |
+
+The renderer composites the OBJ pixels of a rectangle on the CPU where
+drawing one OBJ at a time would not give the GBA's OBJ layer (see
+`obj_cpu_begin` in `render_obj.c`); the `synth_obj*`, `synth_semi*`,
+`synth_mosaic*` and `synth_objprio` states exercise it.  `synth_sat14_6`
+is the one known difference: the 14/6 alpha blend has no exact RDP
+configuration (off by one in some channels).

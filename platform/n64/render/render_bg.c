@@ -530,8 +530,130 @@ static void scroll_of(int n, int line, int *h, int *v) {
     }
 }
 
+/* ------------------------------------------------------------ mosaic */
+
+static inline int fmod_i(int a, int m) {
+    int r = a % m;
+    return r < 0 ? r + m : r;
+}
+
+/* BG mosaic of layer n: block width and height (1 = none) */
+static void bg_mosaic(int n, int *mh, int *mv) {
+    uint32_t m = io16(REG_MOSAIC);
+    int on = (io16(REG_BG0CNT + 2 * n) & 0x40) != 0;
+    *mh = on ? (int)(m & 15) + 1 : 1;
+    *mv = on ? (int)((m >> 4) & 15) + 1 : 1;
+}
+
+/* horizontal mosaic of a row of the region: each pixel repeats the first
+ * one of its block, blocks aligned to the screen (ppu_soft mosaic_h) */
+static void mosaic_row8(uint8_t *row, int w, int mh) {
+    for (int x = 0; x < w; x++) {
+        int src = x - fmod_i(R.gx0 + x, mh);
+        row[x] = row[src < 0 ? 0 : src];
+    }
+}
+
+static void mosaic_row16(uint16_t *row, int w, int mh) {
+    for (int x = 0; x < w; x++) {
+        int src = x - fmod_i(R.gx0 + x, mh);
+        row[x] = row[src < 0 ? 0 : src];
+    }
+}
+
+static void scroll_of(int n, int line, int *h, int *v);
+
+/* One row of a text BG as BG palette indices (0 = transparent), exactly as
+ * ppu_soft's draw_text_bg: map row from line y (mosaic-adjusted), scroll
+ * from 'line', the view's bg_entry hook for world cells it provides. */
+static void text_row(int n, int line, int y, uint8_t *dst, int w) {
+    uint32_t cnt = io16(REG_BG0CNT + 2 * n);
+    uint32_t char_base = ((cnt >> 2) & 3) * 0x4000u, scr_base = ((cnt >> 8) & 31) * 0x800u;
+    uint32_t wmask = (cnt & 0x4000) ? 511 : 255, hmask = (cnt & 0x8000) ? 511 : 255;
+    int bpp8 = (cnt & 0x80) != 0;
+    int h, v;
+    scroll_of(n, line, &h, &v);
+    int (*hook)(int, int, int, uint16_t *) = r_view->bg_entry;
+    int32_t wy = v + y;
+    uint32_t by = (uint32_t)wy & hmask;
+    uint32_t row_base = scr_base + (by >> 8) * ((wmask >> 8) + 1) * 0x800u + ((by >> 3) & 31) * 64;
+    uint32_t ty = by & 7;
+    int32_t bx = h + R.gx0;
+    int x = 0;
+    while (x < w) {
+        uint32_t px = (uint32_t)bx & wmask, e;
+        uint16_t he;
+        if (hook && hook(n, bx >> 3, wy >> 3, &he))
+            e = he;
+        else
+            e = r_vram16(r_vram_wrap(row_base + (px >> 8) * 0x800u + ((px >> 3) & 31) * 2));
+        uint32_t tile = e & 0x3FF, r = (e & 0x800) ? 7 - ty : ty, hflip = (e & 0x400) ? 7 : 0;
+        int c0 = (int)(px & 7), span = 8 - c0 < w - x ? 8 - c0 : w - x;
+        if (bpp8) {
+            uint32_t ta = char_base + tile * 64 + r * 8;
+            for (int i = 0; i < span; i++)
+                dst[x + i] = (uint8_t)(ta < 0x10000u ? r_vram8(ta + ((uint32_t)(c0 + i) ^ hflip)) : 0);
+        } else {
+            uint32_t ta = char_base + tile * 32 + r * 4, pbank = (e >> 12) * 16;
+            for (int i = 0; i < span; i++) {
+                uint32_t c = (uint32_t)(c0 + i) ^ hflip;
+                uint32_t idx = ta < 0x10000u ? r_vram8(ta + (c >> 1)) : 0;
+                idx = (c & 1) ? idx >> 4 : idx & 15;
+                dst[x + i] = (uint8_t)(idx ? pbank + idx : 0);
+            }
+        }
+        x += span;
+        bx += span;
+    }
+}
+
+/* a text BG with mosaic, rasterised on the CPU (mosaic is rare: screen
+ * transitions) */
+static void bg_draw_text_mosaic(int n, int fx, int mh, int mv) {
+    uint64_t t0 = get_ticks();
+    int w = R.gx1 - R.gx0, h = R.gy1 - R.gy0, pitch = (w + 7) & ~7;
+    if (w <= 0 || w > 320 || h <= 0)
+        return;
+    uint8_t *buf = r_scratch((uint32_t)(pitch * h));
+    if (!buf)
+        return;
+    uint8_t row[320 + 8];
+    int last_h = -1, last_v = -1, last_y = 0;
+    for (int yy = 0; yy < h; yy++) {
+        int line = R.gy0 + yy, my = line - fmod_i(line, mv), sh, sv;
+        scroll_of(n, line, &sh, &sv);
+        /* the lines of a mosaic block repeat the first one's row (unless
+         * HBlank changed the scroll in between) */
+        if (sh != last_h || sv != last_v || my != last_y) {
+            text_row(n, line, my, row, w);
+            if (mh > 1)
+                mosaic_row8(row, w, mh);
+            for (int x = w; x < pitch; x++)
+                row[x] = 0;
+            last_h = sh; last_v = sv; last_y = my;
+        }
+        uint64_t *d = (uint64_t *)(buf + yy * pitch);
+        for (int x = 0; x < pitch; x += 8) {
+            uint64_t acc = 0;
+            for (int k = 0; k < 8; k++)
+                acc = (acc << 8) | row[x + k];
+            d[x >> 3] = acc;
+        }
+    }
+    r_stats.us_raster += (uint32_t)TICKS_TO_US(get_ticks() - t0);
+    r_bind(PAL_BG, fx);
+    r_scissor_region();
+    r_blit_image(buf, pitch, FMT_CI8, R.gx0, R.gy0, w, h);
+}
+
 void bg_draw_text(int n, int fx) {
     uint32_t cnt = io16(REG_BG0CNT + 2 * n);
+    int mh, mv;
+    bg_mosaic(n, &mh, &mv);
+    if (mh > 1 || mv > 1) {
+        bg_draw_text_mosaic(n, fx, mh, mv);
+        return;
+    }
     r_bind(PAL_BG, fx);
     /* bands of lines with the same scroll (HBlank snapshots may differ per line) */
     int y = R.gy0;
@@ -596,6 +718,53 @@ void bg_draw_affine(int n, int fx) {
     done_frame[n - 2] = r_frame;
     const uint8_t *vr = (const uint8_t *)gba_mem.vram;
     int fast = wrap && sb + (size >> 3) * (size >> 3) <= 0x10000u && cb + 0x4000u <= 0x10000u;
+    int mh, mv;
+    bg_mosaic(n, &mh, &mv);
+    if (mh > 1 || mv > 1) {
+        /* mosaic (ppu_soft): parameters of the block's first line, then
+         * each pixel repeats the first one of its block */
+        uint8_t row[320 + 8];
+        int last_my = 1 << 30;
+        for (int yy = 0; yy < h; yy++) {
+            int line = R.gy0 + yy, my = line - fmod_i(line, mv);
+            uint64_t *dst = (uint64_t *)(buf + yy * pitch);
+            /* the lines of a block repeat its first row (still in row[]) */
+            if (my != last_my) {
+                last_my = my;
+                aff_t a;
+                affine_line(n, my, &a);
+                uint32_t tx = (uint32_t)a.x + (uint32_t)(a.pa * R.gx0);
+                uint32_t ty = (uint32_t)a.y + (uint32_t)(a.pc * R.gx0);
+                for (int x = 0; x < w; x++, tx += (uint32_t)a.pa, ty += (uint32_t)a.pc) {
+                    uint32_t px = (uint32_t)((int32_t)tx >> 8), py = (uint32_t)((int32_t)ty >> 8), idx = 0;
+                    if (wrap) {
+                        px &= smask;
+                        py &= smask;
+                    } else if (px >= size || py >= size) {
+                        row[x] = 0;
+                        continue;
+                    }
+                    uint32_t tile = vr[r_vram_wrap(sb + ((py >> 3) << tshift) + (px >> 3)) ^ GBA_BX];
+                    uint32_t ta = cb + tile * 64 + (py & 7) * 8 + (px & 7);
+                    if (ta < 0x10000u)
+                        idx = vr[ta ^ GBA_BX];
+                    row[x] = (uint8_t)idx;
+                }
+                if (mh > 1)
+                    mosaic_row8(row, w, mh);
+                for (int x = w; x < pitch; x++)
+                    row[x] = 0;
+            }
+            for (int x = 0; x < pitch; x += 8) {
+                uint64_t acc = 0;
+                for (int k = 0; k < 8; k++)
+                    acc = (acc << 8) | row[x + k];
+                dst[x >> 3] = acc;
+            }
+        }
+        r_stats.us_raster += (uint32_t)TICKS_TO_US(get_ticks() - t0);
+        goto blit;
+    }
     for (int yy = 0; yy < h; yy++) {
         aff_t a;
         affine_line(n, R.gy0 + yy, &a);
@@ -672,6 +841,59 @@ void bg_draw_bitmap(int mode, uint32_t dispcnt, int fx) {
         rspq_wait();
     }
     done_frame[which] = r_frame; done_fx[which] = (uint32_t)fx;
+    int mh, mv;
+    bg_mosaic(2, &mh, &mv);
+    if (mh > 1 || mv > 1) {
+        /* mosaic (ppu_soft): parameters of the block's first line, then
+         * each pixel repeats the first one of its block */
+        uint16_t row[320 + 8];
+        int last_my = 1 << 30;
+        for (int yy = 0; yy < h; yy++) {
+            int line = R.gy0 + yy, my = line - fmod_i(line, mv);
+            /* the lines of a block repeat its first row (still in row[]) */
+            if (my != last_my) {
+                last_my = my;
+                aff_t a;
+                affine_line(2, my, &a);
+                uint32_t tx = (uint32_t)a.x + (uint32_t)(a.pa * R.gx0);
+                uint32_t ty = (uint32_t)a.y + (uint32_t)(a.pc * R.gx0);
+                for (int x = 0; x < w; x++, tx += (uint32_t)a.pa, ty += (uint32_t)a.pc) {
+                    uint32_t px = (uint32_t)((int32_t)tx >> 8), py = (uint32_t)((int32_t)ty >> 8), out = 0;
+                    if (px < bw && py < bh) {
+                        if (ci8) {
+                            out = r_vram8(page + py * 240 + px);
+                        } else {
+                            uint32_t c = r_vram16(page + (py * bw + px) * 2) & 0x7FFF;
+                            if (fx != FX_PLAIN)
+                                c = tau[c & 31] | (tau[(c >> 5) & 31] << 5) | (tau[(c >> 10) & 31] << 10);
+                            out = r_conv(c);
+                        }
+                    }
+                    row[x] = (uint16_t)out;
+                }
+                if (mh > 1)
+                    mosaic_row16(row, w, mh);
+                for (int x = w; x < pitch_px; x++)
+                    row[x] = 0;
+            }
+            uint8_t *dst = buf + yy * pitch;
+            for (int x = 0; x < pitch_px; x += 4) {
+                uint64_t acc = 0;
+                if (ci8) {
+                    for (int k = 0; k < 8; k++)
+                        acc = (acc << 8) | (row[x + k] & 0xFF);
+                    *(uint64_t *)(dst + x) = acc;
+                    x += 4;
+                } else {
+                    for (int k = 0; k < 4; k++)
+                        acc = (acc << 16) | row[x + k];
+                    *(uint64_t *)(dst + x * 2) = acc;
+                }
+            }
+        }
+        r_stats.us_raster += (uint32_t)TICKS_TO_US(get_ticks() - t0);
+        goto blit;
+    }
     for (int yy = 0; yy < h; yy++) {
         aff_t a;
         affine_line(2, R.gy0 + yy, &a);

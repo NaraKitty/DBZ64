@@ -103,6 +103,7 @@ int obj_parse(uint32_t dispcnt, uint8_t lists[4][128], int counts[4]) {
         }
         o->prio = (uint8_t)((a2 >> 10) & 3);
         o->semi = mode == 1;
+        o->mosaic = (a0 & 0x1000) != 0;
         o->bpp8 = (a0 & 0x2000) != 0;
         o->tile = (uint16_t)(a2 & 0x3FF);
         o->pbank = (uint8_t)(a2 >> 12);
@@ -479,16 +480,291 @@ static void draw_affine(const objinfo_t *o, int x, int y) {
     r_blit_image(buf, pitch, FMT_CI8, x + vx0, y + vy0, w, h);
 }
 
+/* ------------------------------------------------------------ CPU-composited part */
+
+/* The rectangle [hole_x0, hole_x1) x [hole_y0, hole_y1) (GBA coordinates,
+ * inside the region) whose OBJ pixels come from cpu_compose_line, and the
+ * OBJs that meet it, in OAM order */
+static int hole_on, hole_x0, hole_y0, hole_x1, hole_y1;
+static uint8_t cpu_list[128];
+static int cpu_n;
+
+static inline int fmod_i(int a, int m) {
+    int r = a % m;
+    return r < 0 ? r + m : r;
+}
+
+/* the bounding boxes of OBJ o's positions that meet the region, clipped */
+static int obj_boxes(const objinfo_t *o, int16_t box[3][4]) {
+    int xs[3], ys[3], nx, ny, n = 0;
+    obj_positions(o, xs, ys, &nx, &ny);
+    for (int a = 0; a < ny; a++)
+        for (int b = 0; b < nx; b++) {
+            box[n][0] = (int16_t)(xs[b] > R.gx0 ? xs[b] : R.gx0);
+            box[n][1] = (int16_t)(ys[a] > R.gy0 ? ys[a] : R.gy0);
+            box[n][2] = (int16_t)(xs[b] + o->bw < R.gx1 ? xs[b] + o->bw : R.gx1);
+            box[n][3] = (int16_t)(ys[a] + o->bh < R.gy1 ? ys[a] + o->bh : R.gy1);
+            n++;
+        }
+    return n;
+}
+
+static inline int box_meets(const int16_t *a, int x0, int y0, int x1, int y1) {
+    return a[0] < x1 && x0 < a[2] && a[1] < y1 && y0 < a[3];
+}
+
+/* grow the rectangle [*x0, *x1) x [*y0, *y1) to cover [a, c) x [b, d) */
+static inline void grow(int *x0, int *y0, int *x1, int *y1, int a, int b, int c, int d) {
+    if (a < *x0)
+        *x0 = a;
+    if (b < *y0)
+        *y0 = b;
+    if (c > *x1)
+        *x1 = c;
+    if (d > *y1)
+        *y1 = d;
+}
+
+int obj_cpu_begin(uint8_t lists[4][128], const int counts[4], int blend, uint8_t codes[8]) {
+    hole_on = 0;
+    uint32_t mosaic = io16(REG_MOSAIC);
+    int omos = (mosaic & 0xFF00) != 0;          /* OBJ mosaic larger than 1x1 */
+    static uint8_t listed[128];
+    static int16_t box[128][3][4];
+    static uint8_t nbox[128];
+    uint8_t idx[128];
+    int n = 0;
+    memset(listed, 0, sizeof listed);
+    for (int p = 0; p < 4; p++)
+        for (int k = 0; k < counts[p]; k++)
+            listed[lists[p][k]] = 1;
+    int x0 = 1 << 30, y0 = 1 << 30, x1 = -(1 << 30), y1 = -(1 << 30);
+#define GROW(a, b, c, d) grow(&x0, &y0, &x1, &y1, (a), (b), (c), (d))
+    for (int i = 0; i < 128; i++) {
+        if (!listed[i])
+            continue;
+        const objinfo_t *o = &info[i];
+        nbox[n] = (uint8_t)obj_boxes(o, box[n]);
+        if (!nbox[n])
+            continue;
+        if (omos && o->mosaic)
+            for (int b = 0; b < nbox[n]; b++)
+                GROW(box[n][b][0], box[n][b][1], box[n][b][2], box[n][b][3]);
+        idx[n++] = (uint8_t)i;
+    }
+    /* a later OBJ with a better priority over an earlier one; with alpha
+     * blending (OBJ_CPU_BLEND_*), any OBJ over another one that blends */
+    for (int a = 0; a < n; a++) {
+        int pa = info[idx[a]].prio, sa = info[idx[a]].semi;
+        if (!pa && !blend)
+            continue;
+        for (int b = a + 1; b < n; b++) {
+            int over = info[idx[b]].prio < pa;
+            if (blend == OBJ_CPU_BLEND_ALL || (blend == OBJ_CPU_BLEND_SEMI && (sa || info[idx[b]].semi)))
+                over = 1;
+            if (!over)
+                continue;
+            for (int i = 0; i < nbox[a]; i++)
+                for (int j = 0; j < nbox[b]; j++) {
+                    const int16_t *p = box[a][i], *q = box[b][j];
+                    int ix0 = p[0] > q[0] ? p[0] : q[0], iy0 = p[1] > q[1] ? p[1] : q[1];
+                    int ix1 = p[2] < q[2] ? p[2] : q[2], iy1 = p[3] < q[3] ? p[3] : q[3];
+                    if (ix0 < ix1 && iy0 < iy1)
+                        GROW(ix0, iy0, ix1, iy1);
+                }
+        }
+    }
+#undef GROW
+    if (x0 >= x1 || y0 >= y1)
+        return 0;
+    hole_on = 1;
+    hole_x0 = x0; hole_y0 = y0; hole_x1 = x1; hole_y1 = y1;
+    /* the OBJs inside, and their (priority, semi) combinations: a pixel of
+     * the composition takes both from one OBJ */
+    int nc = 0;
+    uint8_t seen = 0;
+    cpu_n = 0;
+    for (int k = 0; k < n; k++) {
+        int meets = 0;
+        for (int b = 0; b < nbox[k]; b++)
+            meets |= box_meets(box[k][b], x0, y0, x1, y1);
+        if (!meets)
+            continue;
+        const objinfo_t *o = &info[idx[k]];
+        cpu_list[cpu_n++] = idx[k];
+        int code = o->prio | (o->semi << 2);
+        if (!(seen & (1u << code))) {
+            seen |= (uint8_t)(1u << code);
+            codes[nc++] = (uint8_t)code;
+        }
+    }
+    return nc;
+}
+
+void obj_cpu_end(void) {
+    hole_on = 0;
+}
+
+/* One line of the OBJ layer inside the hole, by ppu_soft's rules (draw_objs):
+ * OBJs in OAM order, an opaque texel replaces the pixel when there is none
+ * or its priority is better, a transparent texel of a better priority still
+ * passes its priority and semi-transparency down; mosaic, affine and the
+ * bitmap-mode cut as there.  col = OBJ palette index (0: no pixel), ps =
+ * prio | semi << 2. */
+static void cpu_compose_line(int line, uint8_t *col, uint8_t *ps) {
+    int sx0 = hole_x0, sx1 = hole_x1, w = sx1 - sx0;
+    uint32_t mosaic = io16(REG_MOSAIC);
+    int mh = (int)((mosaic >> 8) & 15) + 1, mv = (int)((mosaic >> 12) & 15) + 1;
+    uint8_t pr[320];
+    for (int x = 0; x < w; x++) {
+        col[x] = 0;
+        pr[x] = 4;
+        ps[x] = 0xFF;
+    }
+    for (int k = 0; k < cpu_n; k++) {
+        const objinfo_t *o = &info[cpu_list[k]];
+        int bw = o->bw, bh = o->bh, ox = o->x, oy = o->y, row;
+        if (o->own_pos) {
+            row = line - oy;
+            if (row < 0 || row >= bh)
+                continue;
+        } else {
+            row = (line - oy) & 0xFF;
+            if (row >= bh)
+                continue;
+        }
+        if (ox >= sx1 || ox + bw <= sx0)
+            continue;
+        int mos = o->mosaic;
+        if (mos && mv > 1) {
+            row = (line - fmod_i(line, mv)) - oy;
+            if (!o->own_pos)
+                row &= 0xFF;
+            if (row < 0 || row >= bh)
+                row = 0;
+        }
+        int bpp8 = o->bpp8, ow = o->w, oh = o->h;
+        uint32_t tile = o->tile, rs = row_stride_of(o);
+        if (bpp8 && !one_d)
+            tile &= ~1u;
+        uint8_t prio = o->prio, code = (uint8_t)(prio | (o->semi << 2));
+        int xa = ox < sx0 ? sx0 : ox, xb = ox + bw < sx1 ? ox + bw : sx1;
+        for (int x = xa; x < xb; x++) {
+            int lx = x - ox;
+            if (mos && mh > 1) {
+                int mx = x - fmod_i(x, mh);
+                lx = mx < ox ? 0 : mx - ox;
+            }
+            int tx, ty;
+            if (o->affine) {
+                int ix = lx - bw / 2, iy = row - bh / 2;
+                tx = ((o->pa * ix + o->pb * iy) >> 8) + ow / 2;
+                ty = ((o->pc * ix + o->pd * iy) >> 8) + oh / 2;
+                if ((unsigned)tx >= (unsigned)ow || (unsigned)ty >= (unsigned)oh)
+                    continue;
+            } else {
+                tx = o->hf ? ow - 1 - lx : lx;
+                ty = o->vf ? oh - 1 - row : row;
+            }
+            uint32_t t = tile + (uint32_t)(ty >> 3) * rs + (uint32_t)(tx >> 3) * (bpp8 ? 2u : 1u);
+            uint32_t inner = bpp8 ? (uint32_t)((ty & 7) * 8 + (tx & 7)) : (uint32_t)((ty & 7) * 4 + ((tx & 7) >> 1));
+            uint32_t off = (t * 32 + inner) & 0x7FFFu;
+            if (off < min_off)
+                continue;
+            uint32_t v = r_vram8(0x10000 + off);
+            if (!bpp8)
+                v = (tx & 1) ? v >> 4 : v & 15;
+            int b = x - sx0;
+            if (!v) {
+                if (col[b] && prio < pr[b]) {
+                    pr[b] = prio;
+                    ps[b] = code;
+                }
+                continue;
+            }
+            if (!col[b] || prio < pr[b]) {
+                col[b] = (uint8_t)(bpp8 ? v : ((uint32_t)o->pbank << 4) | v);
+                pr[b] = prio;
+                ps[b] = code;
+            }
+        }
+    }
+}
+
+/* The composition of the whole hole, done once per frame when it fits
+ * (the items of all (priority, semi) combinations read it); a larger hole
+ * is composed again for each item. */
+#define COMP_MAX 16384
+static uint8_t comp_col[COMP_MAX], comp_ps[COMP_MAX];
+static uint32_t comp_frame;
+
+void obj_cpu_draw(int code, int fx) {
+    if (!hole_on)
+        return;
+    int w = hole_x1 - hole_x0, h = hole_y1 - hole_y0, pitch = (w + 7) & ~7;
+    uint8_t *buf = r_scratch((uint32_t)(pitch * h));
+    if (!buf)
+        return;
+    int stored = w * h <= COMP_MAX;
+    if (stored && comp_frame != r_frame) {
+        for (int y = 0; y < h; y++)
+            cpu_compose_line(hole_y0 + y, comp_col + y * w, comp_ps + y * w);
+        comp_frame = r_frame;
+    }
+    static uint8_t col[320 + 8], ps[320 + 8];
+    for (int y = 0; y < h; y++) {
+        if (stored) {
+            memcpy(col, comp_col + y * w, (size_t)w);
+            memcpy(ps, comp_ps + y * w, (size_t)w);
+        } else {
+            cpu_compose_line(hole_y0 + y, col, ps);
+        }
+        for (int x = w; x < pitch; x++)
+            ps[x] = 0xFF;
+        uint64_t *d = (uint64_t *)(buf + y * pitch);     /* uncached: 8 pixels a store */
+        for (int x = 0; x < pitch; x += 8) {
+            uint64_t acc = 0;
+            for (int k = 0; k < 8; k++)
+                acc = (acc << 8) | (ps[x + k] == code ? col[x + k] : 0);
+            d[x >> 3] = acc;
+        }
+    }
+    r_bind(PAL_OBJ, fx);
+    r_scissor_region();
+    r_blit_image(buf, pitch, FMT_CI8, hole_x0, hole_y0, w, h);
+}
+
+static void draw_one(const objinfo_t *o, int x, int y) {
+    if (o->affine && !o->ident)
+        draw_affine(o, x, y);
+    else
+        draw_regular(o, x, y);
+}
+
 void obj_draw(int i, int fx) {
     const objinfo_t *o = &info[i];
     r_bind(PAL_OBJ, fx);
-    r_scissor_region();
     r_stats.obj_drawn++;
     int xs[3], ys[3], nx, ny;
     obj_positions(o, xs, ys, &nx, &ny);
     for (int a = 0; a < ny; a++)
         for (int b = 0; b < nx; b++) {
-            if (o->affine && !o->ident) draw_affine(o, xs[b], ys[a]);
-            else draw_regular(o, xs[b], ys[a]);
+            int x = xs[b], y = ys[a];
+            if (!hole_on || x >= hole_x1 || x + o->bw <= hole_x0 || y >= hole_y1 || y + o->bh <= hole_y0) {
+                r_scissor_region();
+                draw_one(o, x, y);
+                continue;
+            }
+            /* around the CPU-composited rectangle: above, below, left, right */
+            int rc[4][4] = { { R.gx0, R.gy0, R.gx1, hole_y0 }, { R.gx0, hole_y1, R.gx1, R.gy1 },
+                             { R.gx0, hole_y0, hole_x0, hole_y1 }, { hole_x1, hole_y0, R.gx1, hole_y1 } };
+            for (int k = 0; k < 4; k++) {
+                const int *c = rc[k];
+                if (c[0] >= c[2] || c[1] >= c[3] || x >= c[2] || x + o->bw <= c[0] ||
+                    y >= c[3] || y + o->bh <= c[1])
+                    continue;
+                r_scissor(c[0], c[1], c[2], c[3]);
+                draw_one(o, x, y);
+            }
         }
 }
