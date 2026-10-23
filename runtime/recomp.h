@@ -67,6 +67,14 @@ static inline void sp_wr32(uint32_t a, uint32_t v) { STK_CHECK(a); STK32(a) = v;
 #define EW16(a) (*(uint16_t *)((uint8_t *)gba_mem.ewram + (((a) & 0x3FFFEu) ^ GBA_HX)))
 #define EW8(a)  (*(uint8_t *)((uint8_t *)gba_mem.ewram + (((a) & 0x3FFFFu) ^ GBA_BX)))
 
+/* ---- I/O registers at compile-time-known addresses (offset into 0x04000000) ---- */
+uint32_t gba_io_read32(uint32_t off);
+uint32_t gba_io_read16(uint32_t off);
+uint32_t gba_io_read8(uint32_t off);
+void gba_io_write32(uint32_t off, uint32_t v);
+void gba_io_write16(uint32_t off, uint32_t v);
+void gba_io_write8(uint32_t off, uint32_t v);
+
 /* ---- control transfer out of a function ---- */
 /* run the function at target (lr unchanged); 0 if unknown (caller unwinds) */
 int gba_jump(uint32_t target);

@@ -108,8 +108,16 @@ void gba_interp_flush_lookups(void) {
 
 /* ------------------------------------------------------------ block transfer */
 
+/* register count of a 16-bit list (the builtin is a libgcc call on MIPS) */
+static inline uint32_t popcount16(uint32_t x) {
+    x = x - ((x >> 1) & 0x5555);
+    x = (x & 0x3333) + ((x >> 2) & 0x3333);
+    x = (x + (x >> 4)) & 0x0F0F;
+    return (x + (x >> 8)) & 0x1F;
+}
+
 static uint32_t blk_start(uint32_t base, uint32_t list, uint32_t f, uint32_t *fin) {
-    uint32_t bytes = list ? (uint32_t)__builtin_popcount(list) * 4 : 0x40;
+    uint32_t bytes = list ? popcount16(list) * 4 : 0x40;
     if (f & BLK_U) {
         *fin = base + bytes;
         return base + ((f & BLK_P) ? 4 : 0);
@@ -773,7 +781,9 @@ static void interp_run(uint32_t start, int jump_mode) {
                 set_tbit(tgt & 1);
                 gba_call(tgt);
                 if (((cpu.next_pc ^ link) >> 1) == 0) {
-                    tgt = norm_target(link);
+                    /* resume in the caller's state, as recompiled callers
+                     * do: a Thumb 'mov lr, pc' link has bit 0 clear */
+                    tgt = seq | th;
                     break;
                 }
                 call = 0;       /* returned elsewhere: a jump to next_pc */

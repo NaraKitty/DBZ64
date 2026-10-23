@@ -515,6 +515,16 @@ class FuncGen:
             base_e = hx(base)
         else:
             base_e = 'r%d' % i.rn
+            kb = self.kconst.get(i.rn)
+            if kb is not None:
+                ko = offv
+                if off_expr is not None:
+                    ko = None
+                    o = i.off
+                    if o[2] == 'lsl' and o[1] in self.kconst:
+                        ko = (self.kconst[o[1]] << o[3]) & 0xffffffff
+                if ko is not None:
+                    const_addr = ((kb + (ko if i.up else -ko)) if i.pre else kb) & 0xffffffff
         if off_expr is None:
             ea = base_e if offv == 0 else '%s %s %du' % (base_e, sign, offv)
         else:
@@ -528,10 +538,18 @@ class FuncGen:
                 if v is not None:
                     if i.signed:
                         v = (v ^ (0x80 if size == 1 else 0x8000)) - (0x80 if size == 1 else 0x8000)
-                    if pc_target_var is None or i.rd != 15:
-                        out.append('%s = %s;' % (dst, hx(v)))
+                    out.append('%s = %s;' % (dst, hx(v)))
+                    if i.wb and i.rn != 15 and i.rn != i.rd:
+                        out.append('r%d = %s;' % (i.rn, ea))
+                    return out
+                ld = self.const_load(const_addr, size, i.signed)
+                if ld is not None:
+                    if i.wb and i.rn != 15 and i.rn != i.rd:
+                        out.append('ft = %s;' % ld)
+                        out.append('r%d = %s;' % (i.rn, ea))
+                        out.append('%s = ft;' % dst)
                     else:
-                        out.append('%s = %s;' % (dst, hx(v)))
+                        out.append('%s = %s;' % (dst, ld))
                     return out
             if on_stack:
                 ld = 'sp_rd32(%s)' % addr_e
@@ -555,7 +573,10 @@ class FuncGen:
             val = hx(i.pcval + (4 if not self.thumb else 0))
         else:
             val = 'r%d' % i.rd
-        if on_stack:
+        st = self.const_store(const_addr, size, val) if const_addr is not None else None
+        if st is not None:
+            pass
+        elif on_stack:
             st = 'sp_wr32(%s, %s);' % (addr_e, val)
         else:
             st = {4: 'wr32', 2: 'wr16', 1: 'wr8'}[size] + '(%s, %s);' % (addr_e, val)
@@ -563,6 +584,84 @@ class FuncGen:
         if i.wb and i.rn != 15:
             out.append('r%d = %s;' % (i.rn, ea))
         return out
+
+    def const_load(self, a, size, signed):
+        """C expression loading a compile-time-known guest address, or None."""
+        if a & (size - 1):
+            return None
+        r = a >> 24
+        if r == 0x03:
+            e = {4: 'IW32(%s)', 2: 'IW16(%s)', 1: 'IW8(%s)'}[size] % hx(a)
+        elif r == 0x02:
+            e = {4: 'EW32(%s)', 2: 'EW16(%s)', 1: 'EW8(%s)'}[size] % hx(a)
+        elif r == 0x04 and (a & 0xFFFFFF) < 0x400:
+            e = {4: 'gba_io_read32(%s)', 2: 'gba_io_read16(%s)', 1: 'gba_io_read8(%s)'}[size] % hx(a & 0xFFFFFF)
+        else:
+            return None
+        if signed:
+            e = '(uint32_t)(int32_t)(%s)%s' % ('int16_t' if size == 2 else 'int8_t', e)
+        return e
+
+    def const_store(self, a, size, val):
+        if a & (size - 1):
+            return None
+        r = a >> 24
+        if r == 0x03:
+            return {4: 'IW32(%s) = %s;', 2: 'IW16(%s) = (uint16_t)%s;', 1: 'IW8(%s) = (uint8_t)%s;'}[size] % (hx(a), val)
+        if r == 0x02:
+            return {4: 'EW32(%s) = %s;', 2: 'EW16(%s) = (uint16_t)%s;', 1: 'EW8(%s) = (uint8_t)%s;'}[size] % (hx(a), val)
+        if r == 0x04 and (a & 0xFFFFFF) < 0x400:
+            return {4: 'gba_io_write32(%s, %s);', 2: 'gba_io_write16(%s, %s);',
+                    1: 'gba_io_write8(%s, %s);'}[size] % (hx(a & 0xFFFFFF), val)
+        return None
+
+    def kconst_update(self, i):
+        """Track registers holding compile-time constants within a block."""
+        k = self.kind[i.addr]
+        if k != 'normal':
+            self.kconst.clear()
+            return
+        kc = self.kconst
+        newv = None
+        if i.cond == COND_AL:
+            if i.op == 'mem' and i.load and i.rn == 15 and i.off[0] == 'imm' and i.pre and i.msize == 4:
+                newv = self.const_rom((i.pcval + (i.off[1] if i.up else -i.off[1])) & 0xffffffff, 4)
+            elif i.op == 'dp' and i.rd < 15 and i.alu not in TESTS:
+                newv = self.const_dp(i, kc)
+        u, d = use_def_basic(i)
+        for r in list(kc):
+            if d & bit(r):
+                del kc[r]
+        if newv is not None and i.op in ('mem', 'dp'):
+            kc[i.rd] = newv & 0xffffffff
+
+    @staticmethod
+    def const_dp(i, kc):
+        o = i.op2
+        if o[0] == 'imm':
+            b = o[1]
+        elif o[0] == 'reg' and o[1] in kc and o[2] in ('lsl', 'lsr', 'asr'):
+            x, n = kc[o[1]], o[3]
+            if o[2] == 'lsl':
+                b = (x << n) & 0xffffffff
+            elif o[2] == 'lsr':
+                b = 0 if n >= 32 else x >> n
+            else:
+                b = ((x - (1 << 32) if x & 0x80000000 else x) >> min(n, 31)) & 0xffffffff
+        else:
+            return None
+        if i.alu == 'mov':
+            return b
+        if i.alu == 'mvn':
+            return ~b & 0xffffffff
+        if i.rn == 15:
+            a = i.pcval
+        elif i.rn in kc:
+            a = kc[i.rn]
+        else:
+            return None
+        return {'add': a + b, 'sub': a - b, 'rsb': b - a, 'orr': a | b, 'and': a & b,
+                'eor': a ^ b, 'bic': a & ~b}.get(i.alu)
 
     def emit_ldm(self, i, pc_target_var):
         out = []
@@ -636,6 +735,7 @@ class FuncGen:
         # sync_out paths that store them (they are in written, so loaded).
         prev_falls = True
         self.lazy = None
+        self.kconst = {}
         prev_addr = None
         for a in self.addrs:
             i = self.ins[a]
@@ -648,11 +748,13 @@ class FuncGen:
             if a in self.labels:
                 self.e('L_%08X:' % a)
                 self.lazy = None
+                self.kconst = {}
             self.e('  /* %08X: %s */' % (a, self.dis(i)))
             body = self.emit_ins(i)
             for b in body:
                 self.e('  ' + b)
             self.update_lazy(i)
+            self.kconst_update(i)
             prev_falls = self.falls_through(i)
             prev_addr = a
         if prev_addr is not None and prev_falls:
