@@ -303,9 +303,15 @@ void gba_irq_service(void) {
 
 /* ------------------------------------------------------------ scheduler */
 
+/* render sequence number each snapshot was taken in: lines not captured
+ * since the last render (HBlank IRQs enabled or disabled mid-frame) get the
+ * live registers instead of a snapshot from an older frame */
+static uint32_t line_stamp[160], render_seq;
+
 static void snapshot_line(int line) {
     if (line < 0 || line >= 160)
         return;
+    line_stamp[line] = render_seq;
     gba_line_regs_t *s = &gba_line_regs[line];
     s->bg2pa = R16(0x20); s->bg2pb = R16(0x22); s->bg2pc = R16(0x24); s->bg2pd = R16(0x26);
     s->bg2x = io32(0x28);
@@ -356,7 +362,12 @@ static void run_next_event(void) {
     set_time(t);
     switch (ev) {
     case 0:
+        if (gba_line_regs_valid)
+            for (int l = 0; l < 160; l++)
+                if (line_stamp[l] != render_seq)
+                    snapshot_line(l);
         plat_frame();
+        render_seq++;
         gba_line_regs_valid = 0;
         dma_run_timed(1);
         if (R16(REG_DISPSTAT) & 0x08)
