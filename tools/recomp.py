@@ -48,6 +48,7 @@ def hx(v):
 # pc -> C function name; filled from game.toml
 OVERRIDE_LOAD = {}      # value loaded at pc is passed through func(value)
 HOOK_BEFORE = {}        # func(const uint32_t regs[15]) runs before pc
+NATIVE = {}             # (addr, thumb) -> C function replacing the routine
 
 
 # ------------------------------------------------------------ function
@@ -864,6 +865,8 @@ def main():
         OVERRIDE_LOAD[e['pc']] = e['func']
     for e in cfg.get('hook_before', []):
         HOOK_BEFORE[e['pc']] = e['func']
+    for e in cfg.get('native', []):
+        NATIVE[(e['addr'], e.get('mode', 'thumb') == 'thumb')] = e['func']
     unreachable = {(e['addr'], e.get('mode', 'thumb') == 'thumb') for e in cfg.get('assume_unreachable', [])}
     noreturn |= unreachable
     taken -= noreturn
@@ -886,6 +889,13 @@ def main():
         g = gens[(f['addr'], f['thumb'])]
         g.set_summaries(summ)
         g.warn_entry = (f['addr'], f['thumb']) in unreachable
+        key = (f['addr'], f['thumb'])
+        if key in NATIVE:
+            # replaced by native C: same register contract (callers use the
+            # summary computed from the original code)
+            bodies.append((f, 'void %s(void) {\n  %s();\n  cpu.next_pc = cpu.r[14];\n}'
+                           % (fname(*key), NATIVE[key])))
+            continue
         bodies.append((f, g.generate()))
     # header with prototypes
     with open(os.path.join(outdir, 'gen_funcs.h'), 'w') as h:
@@ -895,6 +905,8 @@ def main():
             h.write('uint32_t %s(uint32_t v);\n' % fn)
         for fn in sorted(set(HOOK_BEFORE.values())):
             h.write('void %s(const uint32_t *regs);\n' % fn)
+        for fn in sorted(set(NATIVE.values())):
+            h.write('void %s(void);\n' % fn)
         for f, _ in bodies:
             h.write('void %s(void);\n' % fname(f['addr'], f['thumb']))
         h.write('#endif\n')

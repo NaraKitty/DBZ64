@@ -9,7 +9,7 @@ mkdir -p "$OUT/obj"
 CFLAGS="-O2 -g -std=gnu11 -Wall -Wno-unused-label -Wno-unused-variable -Wno-unused-but-set-variable -fno-strict-aliasing ${EXTRA_CFLAGS}"
 INC="-I$REPO/runtime -I$GEN"
 SRCS="$REPO/runtime/mem.c $REPO/runtime/io.c $REPO/runtime/bios.c $REPO/runtime/dispatch.c \
-      $REPO/runtime/runtime.c $REPO/runtime/interp.c $REPO/runtime/ppu_soft.c \
+      $REPO/runtime/runtime.c $REPO/runtime/interp.c $REPO/runtime/native.c $REPO/runtime/ppu_soft.c \
       $REPO/platform/host/main.c"
 OBJS=""
 compile() {

@@ -14,7 +14,7 @@ N64_MKDFS_ROOT := $(BUILD_DIR)/filesystem
 include $(N64_INST)/include/n64.mk
 
 RUNTIME_SRC := runtime/mem.c runtime/io.c runtime/bios.c runtime/dispatch.c \
-               runtime/runtime.c runtime/interp.c runtime/ppu_soft.c
+               runtime/runtime.c runtime/interp.c runtime/ppu_soft.c runtime/native.c
 PLATFORM_SRC := $(wildcard $(REPO)/platform/n64/*.c) $(if $(USE_RDP),$(wildcard $(REPO)/platform/n64/render/*.c))
 PLATFORM_SRC := $(patsubst $(REPO)/%,%,$(PLATFORM_SRC))
 GEN_SRC := $(wildcard $(GEN)/gen_*.c)

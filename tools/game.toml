@@ -90,3 +90,15 @@ note = "exit(): runs destructors then _exit"
 addr = 0x08023714
 mode = "arm"
 note = "veneer to newlib raise(SIGFPE) on the soft-float exception path; FP traps are never enabled"
+
+# Hot hand-written routines replaced by native C (runtime/native.c).
+# Verified bit-exact against the recompiled originals (host audio diff).
+[[native]]
+addr = 0x03000520
+mode = "arm"
+func = "native_mix_voice"
+
+[[native]]
+addr = 0x03000704
+mode = "arm"
+func = "native_clip"
