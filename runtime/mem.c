@@ -212,9 +212,20 @@ uint32_t gba_rd8_slow(uint32_t a) {
     return (w >> ((a & 3) * 8)) & 0xFF;
 }
 
+/* EWRAM/IWRAM pages are always mapped; writes to them still arrive here
+ * from DMA out of EEPROM or I/O (the boot-time save load) and from
+ * emulated unaligned stores (TLB builds) */
+static inline uintptr_t ram_page(uint32_t a) {
+    return gba_wr_page[(a >> 12) & 0xFFFF];
+}
+
 void gba_wr32_slow(uint32_t a, uint32_t v) {
     a &= ~3u;
     switch (a >> 24) {
+    case 0x02:
+    case 0x03:
+        *(uint32_t *)(ram_page(a) + (a & 0xFFC)) = v;
+        return;
     case 0x04:
         gba_io_write32(a & 0x00FFFFFF, v);
         return;
@@ -237,6 +248,10 @@ void gba_wr16_slow(uint32_t a, uint32_t v) {
     a &= ~1u;
     v &= 0xFFFF;
     switch (a >> 24) {
+    case 0x02:
+    case 0x03:
+        *(uint16_t *)(ram_page(a) + ((a & 0xFFE) ^ GBA_HX)) = (uint16_t)v;
+        return;
     case 0x04:
         gba_io_write16(a & 0x00FFFFFF, v);
         return;
@@ -261,6 +276,10 @@ void gba_wr16_slow(uint32_t a, uint32_t v) {
 void gba_wr8_slow(uint32_t a, uint32_t v) {
     v &= 0xFF;
     switch (a >> 24) {
+    case 0x02:
+    case 0x03:
+        *(uint8_t *)(ram_page(a) + ((a & 0xFFF) ^ GBA_BX)) = (uint8_t)v;
+        return;
     case 0x04:
         gba_io_write8(a & 0x00FFFFFF, v);
         return;
