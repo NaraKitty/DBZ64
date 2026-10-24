@@ -626,13 +626,21 @@ static const uint32_t screen_vts[] = {
     /* always-visible classes whose emitters write constant screen x */
     0x0804B500,     /* HUD bars at x 8, 40, 56.. (emit 0x0800BE4E -> 0x0800B99C) */
     0x0804CE28,     /* boss HP bar, 2x 32x8 at (160,y), (192,y) (emit 0x08019658) */
+    /* HUD children made by the HUD's code, at constant x and the HUD's y
+     * ([owner+0x28], which slides in); their isVisible removes them when
+     * their status ends */
+    0x0804C070,     /* "STAT" icon at (92,y) after a level-up (emit 0x0800B55C, owner obj+0x18) */
+    0x0804B4D8,     /* countdown timer at (8,136-y) (emit 0x0800B6A2) */
 };
 
 /* Persistent HUD pieces anchor on their own: they never join another
  * object's cluster by touching it. */
 static const uint32_t hud_vts[] = {
-    0x08049FEC, 0x0804B500, 0x0804CE28,
+    0x08049FEC, 0x0804B500, 0x0804CE28, 0x0804C070, 0x0804B4D8,
 };
+/* the STAT icon belongs to the HUD's cluster: its owner (obj+0x18) is the
+ * HUD object, so it moves with the HUD instead of anchoring by itself */
+#define VT_STAT_ICON 0x0804C070u
 
 static int is_hud(uint32_t vt) {
     for (unsigned i = 0; i < sizeof hud_vts / sizeof hud_vts[0]; i++)
@@ -868,6 +876,8 @@ static void compute_obj_positions(void) {
         if (known && s->has_y && s->y > -2048 && s->y < 2048) { y = s->y; ey++; }
         cls[i] = c;
         owner[i] = known ? s->obj : 0;
+        if (known && s->vt == VT_STAT_ICON && is_ewram(g32(s->obj + 0x18), 4))
+            owner[i] = g32(s->obj + 0x18);
         hud[i] = known && is_hud(s->vt);
         gx[i] = x;
         gy[i] = y;
