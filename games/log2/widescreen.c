@@ -348,8 +348,10 @@ enum { LAYER_NONE, LAYER_FIELD, LAYER_WRAP };
  * 0 inside the map (the game's loader fills such quadrants with a zero
  * chunk) and blank beyond. */
 enum { EDGE_BLANK, EDGE_MIRROR, EDGE_REPEAT, EDGE_ZERO };
+#define EDGE_CELLS 1024              /* cells along a map edge (8192 px) */
 typedef struct {
     int mode, period;
+    int masked;             /* a map edge: rows whose edge cell is dark stay blank */
 } edge_t;
 
 #define RUNS 6
@@ -548,6 +550,20 @@ static int margin_src(int p, int a, int b, int mlo, int mhi, const edge_t ed[2],
     return 1;
 }
 
+/* per cell along each map edge (left, right, top, bottom): how many cells
+ * in from the edge that row (column) shows something before the first dark
+ * cell (decide_edge) */
+static uint8_t edge_run[4][EDGE_CELLS];
+
+/* margin cell k (0 next to edge i) of row u may be filled: mirroring copies
+ * cells 0..k, repeating with period P copies cells 0..P-1, and none of them
+ * may be dark (a black band at a room's edge must not reveal its floor) */
+static inline int edge_fill(int i, int u, int k, const edge_t *r) {
+    if (u < 0 || u >= EDGE_CELLS)
+        return 0;
+    return r->mode == EDGE_REPEAT ? edge_run[i][u] >= r->period : edge_run[i][u] > k;
+}
+
 static int ws_bg_entry(int bg, int cx, int cy, uint16_t *e) {
     layer_t *l = &lay[bg & 3];
     if (l->type != LAYER_FIELD)
@@ -559,8 +575,12 @@ static int ws_bg_entry(int bg, int cx, int cy, uint16_t *e) {
     if (wx + 8 > l->h && wx < l->h + 240 && wy + 8 > l->v && wy < l->v + 160)
         return 0;
     /* past the content: the margin rules of that edge */
-    int hf = 0, vf = 0, r;
+    int hf = 0, vf = 0, r, xm = -1, ym = -1, xk = 0, yk = 0;
     if (wx + 8 <= l->cx0 || wx >= l->cx1) {
+        if (l->ex[wx < l->cx0 ? 0 : 1].masked && l->f1y) {
+            xm = wx < l->cx0 ? 0 : 1;
+            xk = xm ? (wx - l->cx1) >> 3 : (l->cx0 - 8 - wx) >> 3;
+        }
         if (!(r = margin_src(wx, l->cx0, l->cx1, l->mx0, l->mx1, l->ex, &wx, &hf)))
             goto blank;
         if (r == 2) {
@@ -569,6 +589,10 @@ static int ws_bg_entry(int bg, int cx, int cy, uint16_t *e) {
         }
     }
     if (wy + 8 <= l->cy0 || wy >= l->cy1) {
+        if (l->ey[wy < l->cy0 ? 0 : 1].masked && l->f1x) {
+            ym = wy < l->cy0 ? 2 : 3;
+            yk = ym == 3 ? (wy - l->cy1) >> 3 : (l->cy0 - 8 - wy) >> 3;
+        }
         if (!(r = margin_src(wy, l->cy0, l->cy1, l->my0, l->my1, l->ey, &wy, &vf)))
             goto blank;
         if (r == 2) {
@@ -576,6 +600,11 @@ static int ws_bg_entry(int bg, int cx, int cy, uint16_t *e) {
             return 1;
         }
     }
+    /* rows whose content does not reach that far from the edge stay blank
+     * (indexed by the source cell along the edge) */
+    if ((xm >= 0 && !edge_fill(xm, (wy - l->my0) >> 3, xk, &l->ex[xm])) ||
+        (ym >= 0 && !edge_fill(ym, (wx - l->mx0) >> 3, yk, &l->ey[ym - 2])))
+        goto blank;
     if (authored_entry(l, wx, wy, e)) {
         *e ^= (uint16_t)((hf ? 0x400 : 0) | (vf ? 0x800 : 0));
         return 1;
@@ -591,13 +620,14 @@ blank:
 
 /* Maps narrower than 320 or shorter than 240 (108 / 27 of them) are centred
  * in the view, and parallax layers can be smaller than it: the margins show
- * what the GBA never had to draw.  They are filled from the content itself,
- * per edge:
- *  - interiors, whose map edge is black (or empty) along the margin's depth,
- *    stay blank: there is nothing outside a room;
- *  - an edge strip that repeats (forest rows, rock, sand: the tile entries
- *    of every map layer recur with some period P along the inward axis) is
- *    continued with that period, which is seamless;
+ * what the GBA never had to draw.  They are filled from the content itself:
+ *  - a row (or column) whose edge cell is near black on every map layer
+ *    stays blank: rooms keep a black surround inside the map, and there is
+ *    nothing outside a room (transparent counts as black only over a black
+ *    backdrop with no sky layer behind);
+ *  - otherwise, if the edge strip repeats (forest rows, rock, sand: the
+ *    tile entries of every map layer recur with some period P along the
+ *    inward axis) it is continued with that period, which is seamless;
  *  - anything else is mirrored at the edge (tile flips), which is seamless
  *    too and keeps the trees, rock and water of the edge.
  * Parallax layers are always mirrored past their chunk grid.  The decision
@@ -617,38 +647,95 @@ static inline uint32_t pal16(uint32_t i) {
     return *(const uint16_t *)((const uint8_t *)gba_mem.pal + ((i * 2) ^ GBA_HX));
 }
 
-/* every pixel of the tile of BG entry e is transparent or black */
-static int tile_dark(int bg, uint32_t e) {
-    uint32_t cnt = io16(REG_BG0CNT + 2 * bg);
-    int bpp8 = (cnt & 0x80) != 0;
-    uint32_t bytes = bpp8 ? 64 : 32;
-    uint32_t a = ((cnt >> 2) & 3) * 0x4000u + (e & 0x3FF) * bytes;
-    if (a + bytes > 0x10000)
-        return 1;
-    const uint8_t *v = (const uint8_t *)gba_mem.vram;
-    for (uint32_t i = 0; i < bytes; i++) {
-        uint32_t b = v[(a + i) ^ GBA_BX];
-        for (int h = 0; h < (bpp8 ? 1 : 2); h++) {
-            uint32_t idx = bpp8 ? b : (b >> (4 * h)) & 15;
-            if (!idx)
-                continue;
-            uint32_t c = pal16(bpp8 ? idx : ((e >> 12) << 4) + idx);
-            if ((c & 31) + ((c >> 5) & 31) + ((c >> 10) & 31) > 6)
-                return 0;
-        }
+/* A transparent pixel counts as dark only where nothing but a black
+ * backdrop is behind the map layers: over a parallax or wrap layer (a sky
+ * behind a cliff) it is see-through, and mirroring it is harmless. */
+static int transparent_dark(void) {
+    uint32_t c = pal16(0), d = io16(REG_DISPCNT);
+    if ((c & 31) > 4 || ((c >> 5) & 31) > 4 || ((c >> 10) & 31) > 4)
+        return 0;
+    for (int bg = 0; bg < 4; bg++) {
+        const layer_t *l = &lay[bg];
+        if ((d & (0x100u << bg)) &&
+            (l->type == LAYER_WRAP || (l->type == LAYER_FIELD && !(l->f1x && l->f1y))))
+            return 0;
     }
     return 1;
 }
 
+/* the pixels of BG bg's tile for entry e: any transparent, any opaque one
+ * not near black (every channel <= 4 of 31 counts as black) */
+static void tile_info(int bg, uint32_t e, int *transparent, int *bright) {
+    uint32_t cnt = io16(REG_BG0CNT + 2 * bg);
+    int bpp8 = (cnt & 0x80) != 0;
+    uint32_t bytes = bpp8 ? 64 : 32;
+    uint32_t a = ((cnt >> 2) & 3) * 0x4000u + (e & 0x3FF) * bytes;
+    *transparent = *bright = 0;
+    if (a + bytes > 0x10000) {
+        *transparent = 1;
+        return;
+    }
+    const uint8_t *v = (const uint8_t *)gba_mem.vram;
+    for (uint32_t i = 0; i < bytes && !(*transparent && *bright); i++) {
+        uint32_t b = v[(a + i) ^ GBA_BX];
+        for (int h = 0; h < (bpp8 ? 1 : 2); h++) {
+            uint32_t idx = bpp8 ? b : (b >> (4 * h)) & 15;
+            if (!idx) {
+                *transparent = 1;
+                continue;
+            }
+            uint32_t c = pal16(bpp8 ? idx : ((e >> 12) << 4) + idx);
+            if ((c & 31) > 4 || ((c >> 5) & 31) > 4 || ((c >> 10) & 31) > 4)
+                *bright = 1;
+        }
+    }
+}
+
+/* A map cell looks dark: walking the layers front to back (BG priority,
+ * then BG number), no layer shows a pixel that is not near black before an
+ * opaque all-black tile hides the rest; what stays transparent shows the
+ * backdrop, dark when tdark.  (A room's black surround is often an opaque
+ * black wall layer over a floor layer that runs on underneath.) */
+static int cell_dark(const int *bgs, const uint16_t *e, int n, int tdark) {
+    int order[4];
+    for (int i = 0; i < n; i++)
+        order[i] = i;
+    for (int i = 1; i < n; i++)
+        for (int j = i; j > 0; j--) {
+            int a = order[j - 1], b = order[j];
+            int pa = (int)(io16(REG_BG0CNT + 2 * bgs[a]) & 3), pb = (int)(io16(REG_BG0CNT + 2 * bgs[b]) & 3);
+            if (pa < pb || (pa == pb && bgs[a] < bgs[b]))
+                break;
+            order[j - 1] = b;
+            order[j] = a;
+        }
+    for (int i = 0; i < n; i++) {
+        int k = order[i], transparent, bright;
+        if (e[k] == 0xFFFF)
+            continue;                       /* no tile: see-through */
+        tile_info(bgs[k], e[k], &transparent, &bright);
+        if (bright)
+            return 0;
+        if (!transparent)
+            return 1;
+    }
+    return tdark;
+}
+
 /* the rule for one edge of the map layers: axis 0 = x, side 0 = low;
- * 'depth' = margin tiles the view can show past it */
-static edge_t decide_edge(int axis, int side, int depth) {
-    edge_t r = { EDGE_BLANK, 0 };
+ * 'depth' = margin tiles the view can show past it.  run[] gets, per cell
+ * along the edge (from the map's start), how many cells in from the edge
+ * that row (column) shows something before its first dark cell. */
+static edge_t decide_edge(int axis, int side, int depth, uint8_t run[EDGE_CELLS]) {
+    edge_t r = { EDGE_BLANK, 0, 0 };
+    memset(run, 0, EDGE_CELLS);
     int bgs[4], nl = 0, along = 1 << 30, inward = 1 << 30;
     for (int bg = 0; bg < 4; bg++) {
         layer_t *l = &lay[bg];
         if (l->type != LAYER_FIELD || !(axis ? l->f1y : l->f1x))
             continue;
+        if (!(io16(REG_DISPCNT) & (0x100u << bg)))
+            continue;                       /* not shown */
         if (!(axis ? l->mby[side] : l->mbx[side]))
             continue;                       /* its grid ends inside the map */
         if ((l->cx0 | l->cx1 | l->cy0 | l->cy1) & 7)
@@ -677,21 +764,7 @@ static edge_t decide_edge(int axis, int side, int depth) {
                 strip[i][y][j] = authored_entry(l, px, py, &e) ? e : 0xFFFF;
             }
     }
-    /* blank when the edge itself or the strip the margin would copy is at
-     * least half dark (rooms keep a black border a few tiles thick inside
-     * the map: the strip may reach their walls) */
-    int dark = 0, dark_edge = 0;
-    for (int y = 0; y < rows; y++)
-        for (int j = 0; j < depth; j++) {
-            int d = 1;
-            for (int i = 0; i < nl && d; i++)
-                d = strip[i][y][j] == 0xFFFF || tile_dark(bgs[i], strip[i][y][j]);
-            dark += d;
-            if (j == 0)
-                dark_edge += d;
-        }
-    if (2 * dark >= rows * depth || 2 * dark_edge >= rows)
-        return r;
+
     /* the shortest period that (nearly) all layers agree on */
     int best = 0, best_score = 0;
     for (int P = 2; P <= 16 && P + depth <= cols; P++) {
@@ -714,6 +787,37 @@ static edge_t decide_edge(int axis, int side, int depth) {
     } else {
         r.mode = EDGE_MIRROR;
     }
+    /* How far each row (column) shows something from the edge in (cells
+     * that look dark: cell_dark).  A room's black surround then stays
+     * blank, so its walls and floor are never mirrored, while a corridor or
+     * ground that reaches the edge goes on. */
+    int tdark = transparent_dark(), any = 0;
+    int need = r.mode == EDGE_REPEAT ? imax(depth, r.period) : depth;
+    int n_along = imin(EDGE_CELLS, (axis ? map_w() : map_h()) >> 3);
+    for (int u = 0; u < n_along; u++) {
+        int k = 0;
+        for (; k < need; k++) {
+            uint16_t e[4];
+            for (int i = 0; i < nl; i++) {
+                layer_t *l = &lay[bgs[i]];
+                int t = side ? -8 - 8 * k : 8 * k;
+                int px = axis ? l->mx0 + 8 * u : (side ? l->cx1 : l->cx0) + t;
+                int py = axis ? (side ? l->cy1 : l->cy0) + t : l->my0 + 8 * u;
+                if (!authored_entry(l, px, py, &e[i]))
+                    e[i] = 0xFFFF;
+            }
+            if (cell_dark(bgs, e, nl, tdark))
+                break;
+        }
+        run[u] = (uint8_t)k;
+        any |= k;
+    }
+    if (!any) {
+        r.mode = EDGE_BLANK;
+        r.period = 0;
+        return r;
+    }
+    r.masked = 1;
     return r;
 }
 
@@ -723,9 +827,11 @@ static edge_t decide_edge(int axis, int side, int depth) {
 static void decide_map_edge(int i, int W, int H) {
     int axis = i >> 1, side = i & 1;
     int m = axis ? (H < WS_H ? (WS_H - H + 1) / 2 : 0) : (W < WS_W ? (WS_W - W + 1) / 2 : 0);
-    edge_t e = decide_edge(axis, side, (m + 7) / 8 + 1);
-    if (memcmp(&e, &map_edge[i], sizeof e)) {
+    static uint8_t run[EDGE_CELLS];
+    edge_t e = decide_edge(axis, side, (m + 7) / 8 + 1, run);
+    if (memcmp(&e, &map_edge[i], sizeof e) || memcmp(run, edge_run[i], sizeof run)) {
         map_edge[i] = e;
+        memcpy(edge_run[i], run, sizeof run);
         map_generation++;              /* the margins change: renderer caches */
     }
 }
@@ -739,6 +845,7 @@ static void update_edges(int W, int H, uint32_t key, int all_now) {
         edges_key = key;
         edge_age = 0;
         memset(map_edge, 0, sizeof map_edge);
+        memset(edge_run, 0, sizeof edge_run);
     }
     if (all_now) {
         for (int i = 0; i < 4; i++)
@@ -748,7 +855,7 @@ static void update_edges(int W, int H, uint32_t key, int all_now) {
     }
     if (edge_age < 1000)
         edge_age++;
-    static const edge_t zero = { EDGE_ZERO, 0 };
+    static const edge_t zero = { EDGE_ZERO, 0, 0 };
     for (int bg = 0; bg < 4; bg++) {
         layer_t *l = &lay[bg];
         if (l->type != LAYER_FIELD)

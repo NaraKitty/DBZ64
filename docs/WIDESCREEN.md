@@ -138,10 +138,23 @@ edge, all factor-1.0 layers whose clip ends at the map edge, together). On
 an axis the view does not exceed (x when W >= 320, y when H >= 240) only
 shake can show a margin: the strip is one cell deep and sampled at 16
 positions.
-- **blank** when the outermost cells, or the whole strip, are at least half
-  dark: every layer's tile is transparent or black (`tile_dark`, from VRAM
-  and the palette). Rooms keep a black border inside the map, so interiors
-  stay as they were.
+- **blank**, row by row: a cell looks dark when, walking the shown map
+  layers front to back (BG priority, then number), no tile has a pixel that
+  is not near black (every channel <= 4 of 31) before an opaque all-black
+  tile hides the rest, and what stays transparent shows only a black
+  backdrop with no sky layer behind (`cell_dark`, `tile_info`,
+  `transparent_dark`, from VRAM and the palette). Rooms often draw their
+  black surround as an opaque layer over a floor layer that runs on
+  underneath, which is why the walk stops there. Per cell along the edge,
+  `edge_run` holds how many cells in from the edge the row (column) shows
+  something before its first dark cell; margin cell k of a mirrored row is
+  filled only when k < run, and a repeated row only when run >= P (looked up
+  by the source cell). Rooms keep a black surround inside the map, so
+  interiors stay as they were: their walls and floor are never mirrored,
+  even through a thin dark band at the edge, while a corridor or ground
+  that reaches the edge goes on. Over a sky layer (the cliff path,
+  map 11) the transparent part of the map is see-through and is mirrored
+  with the rest.
 - **repeat P** when, for some period P from 2 to 16 cells, at least 90% of
   the strip equals the strip P cells further in, on every layer at once (a
   regular forest edge).
