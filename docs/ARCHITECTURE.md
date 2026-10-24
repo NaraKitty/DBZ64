@@ -137,7 +137,7 @@ For LoG2 (`games/log2/game.toml`):
     marks it dirty for the renderer.
 - ROM lives on the cartridge and is paged into a cache in 16 KB pages
   (`platform/n64/rom_n64.c`): what the heap has left after code, BSS, the
-  renderer and the game stack, at most 2 MB (LoG2 2 MB, Buu's Fury 1.25 MB).
+  renderer and the game stack, at most 2 MB (LoG2 2 MB, Buu's Fury 1.2 MB).
   - A miss is a PI DMA with interrupts off. The game's hot pages
     (`game.toml` `[rom] preload`, found with `tools/rom_hotset.py` from host
     traces) are therefore loaded at boot; at most 7/8 of the cache is
@@ -225,9 +225,12 @@ of random field play):
 
 "Before" is 34d29df, whose RDP build ran out of RDRAM for the 2 MB ROM
 cache (it is measured with the cache cut to 768 KB, which then missed 930
-times in that random stretch).  The ROM cache now misses only when new
-content is first used: none during the script's field play, 14 in the
-random stretch.  LoG2 over the same round: its heaviest stretch 9.2 ->
+times in that random stretch).  The ROM cache now misses none during the
+script's field play, and 12-14 times in the random stretch: field play
+there touches 77 pages, more than the 76 the cache holds, so pages evicted
+earlier come back (at most 4 of those misses are first uses).  The story
+intro misses at its scene changes (about 90 pages in ares; the script
+touches 118 pages).  LoG2 over the same round: its heaviest stretch 9.2 ->
 8.7 ms (game + draw), quiet field play unchanged.
 
 When a frame runs over anyway, the platform skips drawing (at most two
