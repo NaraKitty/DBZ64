@@ -372,6 +372,14 @@ addr = 0x03000388
 mode = "arm"
 func = "native_bitmap_tiles"
 
+# Mode-7 overworld HBlank handler: per-line BG2 affine registers from the
+# line table without five emulated I/O accesses per line (native.c; game.h
+# GAME_HBLANK_NATIVE serves it in the scheduler)
+[[native]]
+addr = 0x08008098
+mode = "thumb"
+func = "native_buu_hblank"
+
 # strided 8x8 tile gather out of decoded sprite bitmaps: LoG2's 0x03000480
 # with the stride field at +0x28 instead of +0x2C (runtime/native.c)
 [[native]]

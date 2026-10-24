@@ -5,6 +5,7 @@
  * the guest routine leaves exactly as it does.
  */
 #include "gba.h"
+#include "io.h"
 #include "recomp.h"
 #include "rom.h"
 
@@ -783,4 +784,58 @@ void native_bitmap_tiles(void) {
     cpu.r[9] = sp_rd32(sp - 12);
     cpu.r[10] = sp_rd32(sp - 8);
     cpu.r[11] = sp_rd32(sp - 4);
+}
+
+/* ------------------------------------------------------------ Mode-7 HBlank handler */
+
+/* 0x08008098 (Thumb): the HBlank IRQ handler of the Mode-7 overworld.  On
+ * lines 0x37..0x9F it copies the next line's BG2 affine parameters, a
+ * 16-byte entry {PA|PB, PC|PD, X, Y} of the per-line table at
+ * [[0x0807101C] + 0x80 + 0x28] (ROM 0x0807101C holds the view object
+ * 0x030019A4: the table pointer is [0x03001A4C]) indexed by VCOUNT+1, to
+ * 0x04000020..0x0400002F; on other lines it does nothing.  The guest code
+ * does that with four word stores to I/O, emulated accesses on N64, on 105
+ * lines a frame (and the IRQ is taken on all 228; with GAME_HBLANK_NATIVE
+ * in game.h the scheduler serves it without the dispatcher).
+ *
+ *   movs r0,#1; lsls r0,#26; push {r4}; ldrb r0,[r0,#6] (VCOUNT);
+ *   cmp r0,#0x37; blt out; cmp r0,#0xA0; bge out;
+ *   ldr r1,=0x08071018; adds r0,#1; ldr r1,[r1,#4]; lsls r0,#4;
+ *   adds r1,#0x80; ldr r1,[r1,#0x28]; ldr r4,=0x04000020; adds r0,r1,r0;
+ *   ldm r0,{r0-r3}; stm r4!,{r0-r3}; out: pop {r4}; bx lr
+ *
+ * Outputs as the recompiled routine leaves them: r0-r3 and the flags of the
+ * last cmp / adds (r4 is restored by the pop), and the pushed word (0: r4
+ * is not an input of the recompiled routine). */
+void native_buu_hblank(void) {
+    wr32(cpu.r[13] - 4, 0);
+    uint32_t vc = gba_io_read8(REG_VCOUNT);
+    if (vc < 0x37 || vc >= 0xA0) {
+        uint32_t k = vc < 0x37 ? 0x37u : 0xA0u, fr = vc - k;     /* the cmp that exits */
+        cpu.r[0] = vc;
+        cpu.n = fr >> 31;
+        cpu.z = fr == 0;
+        cpu.c = vc >= k;
+        cpu.v = ((vc ^ k) & (vc ^ fr)) >> 31;
+        return;
+    }
+    uint32_t tab = rd32(rd32(0x0807101Cu) + 0x80u + 0x28u);
+    uint32_t off = (vc + 1) << 4;
+    uint32_t e = tab + off;
+    uint32_t w0 = rd32(e), w1 = rd32(e + 4), w2 = rd32(e + 8), w3 = rd32(e + 12);
+    /* gba_io_write32() of 0x20..0x2C: plain register stores (no side
+     * effects), so the native 32-bit words of the register file are written
+     * directly (as LoG2's native_m1_hblank) */
+    gba_mem.io[REG_BG2PA >> 2] = w0;
+    gba_mem.io[(REG_BG2PA >> 2) + 1] = w1;
+    gba_mem.io[REG_BG2X >> 2] = w2;
+    gba_mem.io[(REG_BG2X >> 2) + 1] = w3;
+    cpu.r[0] = w0;
+    cpu.r[1] = w1;
+    cpu.r[2] = w2;
+    cpu.r[3] = w3;
+    cpu.n = e >> 31;
+    cpu.z = e == 0;
+    cpu.c = e < tab;
+    cpu.v = ((tab ^ e) & (off ^ e)) >> 31;
 }
