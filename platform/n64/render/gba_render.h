@@ -31,11 +31,12 @@
  *    gba_render_invalidate_bg(bg) for the affected BGs.  obj_pos is queried
  *    every frame.
  *
- * Memory (allocated by gba_render_init): BG layer cache 595KB (4 x 512x256
+ * Memory (allocated by gba_render_init): BG layer cache 611KB (4 x 512x256
  * CI8 rings + slot tables; rings 2 and 3 are one block that holds the
  * affine BG texture in modes 1/2), BG VRAM shadow 72KB, OBJ shadow + scratch 64KB, raw RDP
  * command buffer 128KB, scratch 160KB, blend intermediate 300KB + tag buffer
- * 150KB (320x240); affine/bitmap BG raster buffers (75KB each) on first use.
+ * 150KB (320x240), blend-path cell masks 34KB; affine/bitmap BG raster
+ * buffers (75KB each) on first use.
  */
 #ifndef GBA_RENDER_H
 #define GBA_RENDER_H
@@ -96,13 +97,17 @@ typedef struct gba_render_stats {
     uint32_t rects;         /* texture rectangles enqueued */
     uint32_t loads, load_bytes;   /* TMEM loads by the raw paths (TLUT loads not counted) */
     uint32_t px_copy, px_1cyc, px_2cyc, px_fill;   /* pixels covered per RDP mode */
-    uint32_t blend_path;    /* 1 = 32-bit blend path with the 2x final pass, 2 = with the TLUT final pass */
+    uint32_t blend_path;    /* 32-bit blend path with: 1 = the 2x final pass, 2 = the TLUT final
+                               pass, 3 = the TLUT final pass in two passes */
     uint32_t tags;          /* 1 = 2nd-target tags (Z buffer) were needed */
     uint32_t blend_wrong;   /* model-predicted wrong (a,b) pairs of the blend config, of 1024 */
     uint32_t dirty_mask;    /* the VRAM pages reported dirty (bit n = 4KB page n) */
     uint32_t obj_units_conv;/* 32-byte OBJ VRAM units converted into the shadows */
     uint32_t aff_cells;     /* affine BG texture: map cells re-resolved */
     uint32_t us_aff_update; /* part of us_raster: affine BG texture update */
+    uint32_t blend_px;      /* pixels drawn through the 32-bit blend path */
+    uint32_t tag_px;        /* of these, with 2nd-target tags */
+    uint32_t blend_rects;   /* rectangles of the blend path */
 } gba_render_stats_t;
 
 const gba_render_stats_t *gba_render_get_stats(void);

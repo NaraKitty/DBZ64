@@ -277,6 +277,95 @@ def st_sat(eva=9, evb=16):
     return s
 
 
+def st_weather(eva=16, evb=12, hole=False):
+    """a solid full-screen first target with few colours (rain: red/green <= 7,
+    blue up to 31) over 2nd targets, sprites below and above it, backdrop not a
+    2nd target (with 'hole', BG3 has transparent tiles so it shows through)"""
+    s = St()
+    rnd_pal(s, 0, 512)
+    for i, c in enumerate([(7, 7, 31), (0, 0, 31), (0, 0, 25), (0, 0, 15)]):
+        s.c(48 + i, c[0] | (c[1] << 5) | (c[2] << 10))
+    background(s, bg=3, prio=3, sb=31)
+    if hole:
+        tiles8(s, 60 * 64, 1, transp=1.0)        # tile 60: transparent
+        for o in range(0, 0x400, 7):
+            s.v16(31 * 0x800 + o * 2, 60)
+    tiles8(s, 64 * 64, 32, transp=0.6)
+    for o in range(0x400):
+        s.v16(30 * 0x800 + o * 2, 64 + R.randrange(32) | (R.randrange(4) << 10))
+    s.r(0x0C, 0x80 | (30 << 8) | 2)              # BG2 partial prio2
+    tiles8(s, 96 * 64, 16, transp=0.0, lo=48, hi=52)
+    for o in range(0x400):
+        s.v16(28 * 0x800 + o * 2, 96 + R.randrange(16) | (R.randrange(4) << 10))
+    s.r(0x08, 0x80 | (28 << 8) | 0)              # BG0 first target, solid, prio0
+    obj_vram_random(s)
+    sprites_grid(s, prio_cycle=False)
+    for i in range(24):                          # sprites 0-11 above BG0 (prio 0), 12-23 below
+        a2 = struct.unpack_from('<H', s.oam, i * 8 + 4)[0]
+        struct.pack_into('<H', s.oam, i * 8 + 4, (a2 & ~0x0C00) | ((0 if i < 12 else 1) << 10))
+    s.r(0x50, 0x1E41)                            # BG0 1st, BG1-3 + OBJ 2nd, backdrop not
+    s.r(0x52, eva | (evb << 8))
+    s.r(0x00, 0x1D40)
+    return s
+
+
+def st_sunbeam(eva=9, evb=16):
+    """a partial first target whose colours stay below 28 (sunbeams through a
+    window) over a room, backdrop not a 2nd target around it"""
+    s = St()
+    rnd_pal(s, 0, 512)
+    for i in range(16):
+        g = 4 + i
+        s.c(32 + i, g | (g << 5) | (g << 10))
+    # BG3: a room in the middle of the screen (opaque tiles), backdrop around it
+    tiles8(s, 0, 32, transp=0.0)
+    for o in range(0x400):
+        x, y = o & 31, o >> 5
+        s.v16(31 * 0x800 + o * 2, (R.randrange(32) | (R.randrange(4) << 10)) if 4 <= x < 26 and 3 <= y < 17 else 63)
+    tiles8(s, 63 * 64, 1, transp=1.0)
+    s.r(0x0E, 0x80 | (31 << 8) | 3)
+    # BG0: soft beams over part of the room and past its top-left corner
+    tiles8(s, 64 * 64, 16, transp=0.4, lo=32, hi=48)
+    tiles8(s, 80 * 64, 1, transp=1.0)
+    for o in range(0x400):
+        x, y = o & 31, o >> 5
+        s.v16(28 * 0x800 + o * 2, (64 + R.randrange(16)) if 2 <= x < 16 and 1 <= y < 12 else 80)
+    s.r(0x08, 0x80 | (28 << 8) | 1)
+    obj_vram_random(s)
+    sprites_grid(s, prio_cycle=False)
+    for i in range(24):
+        a2 = struct.unpack_from('<H', s.oam, i * 8 + 4)[0]
+        struct.pack_into('<H', s.oam, i * 8 + 4, (a2 & ~0x0C00) | ((1 if i < 12 else 2) << 10))
+    s.r(0x50, 0x1841)                            # BG0 1st; BG3 + OBJ 2nd
+    s.r(0x52, eva | (evb << 8))
+    s.r(0x00, 0x1940)
+    return s
+
+
+def st_dialog(empty=True):
+    """the field with BLDCNT set for a first target that is empty (or has a
+    few tiles in one corner), as the game does during dialogues"""
+    s = St()
+    rnd_pal(s, 0, 512)
+    background(s, bg=3, prio=3, sb=31)
+    tiles8(s, 64 * 64, 32, transp=0.5)
+    for o in range(0x400):
+        s.v16(30 * 0x800 + o * 2, 64 + R.randrange(32) | (R.randrange(4) << 10))
+    s.r(0x0C, 0x80 | (30 << 8) | 2)
+    tiles8(s, 96 * 64, 1, transp=1.0)            # tile 96: transparent
+    tiles8(s, 97 * 64, 4, transp=0.3)
+    for o in range(0x400):
+        x, y = o & 31, o >> 5
+        s.v16(28 * 0x800 + o * 2, 97 + (o & 3) if (not empty and 25 <= x < 29 and 15 <= y < 19) else 96)
+    s.r(0x08, 0x80 | (28 << 8) | 1)
+    obj_vram_random(s)
+    sprites_grid(s, prio_cycle=False)
+    s.r(0x50, 0x1E41)
+    s.r(0x52, 14 | (6 << 8))
+    s.r(0x00, 0x1D40)
+    return s
+
+
 def st_mode4(page=0, scaled=False):
     s = St()
     rnd_pal(s)
@@ -611,6 +700,11 @@ def main():
         'synth_bgedge': st_bgedge(),
         'synth_obj4_many': st_obj4_many(),
         'synth_semi_dark_bd': st_semi_dark_bd(),
+        'synth_rain': st_weather(16, 12),
+        'synth_rain_hole': st_weather(16, 12, hole=True),
+        'synth_sunbeam': st_sunbeam(9, 16),
+        'synth_dialog': st_dialog(True),
+        'synth_dialog_corner': st_dialog(False),
     }
     for name, s in states.items():
         s.save(os.path.join(out, name + '.bin'))

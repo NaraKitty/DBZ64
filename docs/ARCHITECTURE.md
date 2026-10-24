@@ -271,6 +271,12 @@ the interpreter (`runtime/interp.c`) a reference for the recompiled code:
   one load with dilated fixed-point coordinates (three instructions advance
   both); unrotated lines copy their texel row first; a line with the
   parameters of the line above is a copy.
+- Alpha blending goes through a 32-bit intermediate, which is slow on
+  hardware, so only the 8x8 cells where a first target can have a pixel use
+  it; the rest of the frame takes the plain COPY path.  The game keeps BLDCNT
+  set for an empty BG0 in its field maps and during dialogues, so those
+  frames cost the same as ordinary ones.  The cost model behind this and its
+  calibration on the Analogue 3D: `docs/RDP_COST.md`.
 
 **320×240 view:**
 - On field maps, background margins come from the game's authored map chunks.

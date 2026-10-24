@@ -184,9 +184,9 @@ static void fresh_range(uint32_t u0, uint32_t n) {
         fresh_bits[w] |= m;
         while (stale) {
             /* a run of stale units inside this word */
-            int b0 = __builtin_ctz(stale);
+            int b0 = r_ctz64(stale);
             uint32_t x = ~(stale >> b0);
-            int len = x ? __builtin_ctz(x) : 32 - b0;
+            int len = x ? r_ctz64(x) : 32 - b0;
             stale &= ~((len == 32 ? 0xFFFFFFFFu : ((1u << len) - 1)) << b0);
             conv_units(w * 32 + (uint32_t)b0, (uint32_t)len);
         }
@@ -339,7 +339,7 @@ static int draw_regular_fast(const objinfo_t *o, int x, int y) {
     int hf = o->hf, vf = o->vf;
     uint64_t w1 = (hf ? 0 : (uint64_t)(7 * 32) << 48) | (vf ? (uint64_t)(7 * 32) << 32 : 0) |
                   ((uint64_t)(hf ? 0x400 : 0xFC00) << 16) | (vf ? 0xFC00 : 0x400);
-    int shift = __builtin_ctz((unsigned)tw);
+    int shift = r_ctz64((unsigned)tw);
     uint64_t *p = raw_ptr;
     for (int k0 = 0; k0 < n; k0 += 32) {
         int kn = n - k0 < 32 ? n - k0 : 32;
@@ -374,7 +374,7 @@ static void draw_regular(const objinfo_t *o, int x, int y) {
     uint32_t row_stride = row_stride_of(o);
     objinfo_t tmp;
     if (o->bpp8 && !one_d) { tmp = *o; tmp.tile &= ~1u; o = &tmp; }
-    const int gx0 = R.gx0, gy0 = R.gy0, gx1 = R.gx1, gy1 = R.gy1;
+    const int gx0 = R.wx0, gy0 = R.wy0, gx1 = R.wx1, gy1 = R.wy1;
     const int hf = o->hf, vf = o->vf;
     const rclip_t c = r_clip;
     emit_t e = { raw_ptr, raw_end - (6 + 3 + 2 * 32 + 4), NULL, 0, 0, 0, 0, 0, 0 };
@@ -412,7 +412,7 @@ static void draw_regular(const objinfo_t *o, int x, int y) {
 
 static void draw_affine(const objinfo_t *o, int x, int y) {
     /* visible part of the bounding box */
-    int vx0 = R.gx0 - x, vy0 = R.gy0 - y, vx1 = R.gx1 - x, vy1 = R.gy1 - y;
+    int vx0 = R.wx0 - x, vy0 = R.wy0 - y, vx1 = R.wx1 - x, vy1 = R.wy1 - y;
     if (vx0 < 0) vx0 = 0;
     if (vy0 < 0) vy0 = 0;
     if (vx1 > o->bw) vx1 = o->bw;
@@ -488,7 +488,31 @@ void obj_draw(int i, int fx) {
     obj_positions(o, xs, ys, &nx, &ny);
     for (int a = 0; a < ny; a++)
         for (int b = 0; b < nx; b++) {
+            if (xs[b] >= R.wx1 || xs[b] + o->bw <= R.wx0 || ys[a] >= R.wy1 || ys[a] + o->bh <= R.wy0)
+                continue;                       /* outside the draw window */
             if (o->affine && !o->ident) draw_affine(o, xs[b], ys[a]);
             else draw_regular(o, xs[b], ys[a]);
         }
+}
+
+uint32_t obj_colour_max(int i) {
+    const objinfo_t *o = &info[i];
+    uint32_t lo = o->bpp8 ? 257 : 256 + o->pbank * 16u + 1, hi = o->bpp8 ? 511 : lo + 14;
+    uint32_t m[3] = { 0, 0, 0 };
+    for (uint32_t k = lo; k <= hi; k++) {
+        uint32_t c = r_pal16(k);
+        for (int ch = 0; ch < 3; ch++, c >>= 5)
+            if ((c & 31) > m[ch]) m[ch] = c & 31;
+    }
+    return m[0] | (m[1] << 5) | (m[2] << 10);
+}
+
+int obj_box(int i, int *x0, int *y0, int *x1, int *y1) {
+    const objinfo_t *o = &info[i];
+    int xs[3], ys[3], nx, ny;
+    obj_positions(o, xs, ys, &nx, &ny);
+    if (!nx || !ny) return 0;
+    *x0 = xs[0]; *x1 = xs[nx - 1] + o->bw;
+    *y0 = ys[0]; *y1 = ys[ny - 1] + o->bh;
+    return 1;
 }

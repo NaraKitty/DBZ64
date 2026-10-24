@@ -29,20 +29,33 @@
  *  4. Colour effects (BLDCNT):
  *       - brighten/darken and alpha with EVB=0 (fades) depend only on the top
  *         pixel: the first-target layers get a remapped TLUT (exact).
- *       - alpha with EVB>0 (and semi-transparent OBJs): the frame is drawn in
- *         1-cycle mode into a 32-bit intermediate where a colour c is stored
- *         as 4c (the sum of two layers cannot wrap the 8-bit channel), and the
- *         first-target layers are blended over it with a per-(EVA,EVB)
- *         blender/combiner configuration plus a TLUT remap (blend_table.h).
- *         A final pass converts to the display: a 2-cycle "2x" pass
- *         (v -> min(31, v>>2), exact for v <= 191) or, when EVA+EVB is large
- *         enough to exceed that, a TLUT pass that reads the intermediate as
- *         bytes and maps every value through a table (saturation included).
+ *       - alpha with EVB>0 (and semi-transparent OBJs): where a first target
+ *         may have an opaque pixel, the frame is drawn in 1-cycle mode into a
+ *         32-bit intermediate where a colour c is stored as 4c (the sum of
+ *         two layers cannot wrap the 8-bit channel), and the first-target
+ *         layers are blended over it with a per-(EVA,EVB) blender/combiner
+ *         configuration plus a TLUT remap (blend_table.h).  A final pass
+ *         converts to the display: a 2-cycle "2x" pass (v -> min(31, v>>2),
+ *         exact for v <= 191) or, when the first-target colours in view can
+ *         exceed that, a TLUT pass that reads the intermediate as bytes and
+ *         maps every value through a table (saturation included).
  *       - BLDCNT's rule that a pixel blends only when the layer under it is a
- *         2nd target: when a layer that is not a 2nd target (or the backdrop)
+ *         2nd target: where a layer that is not a 2nd target (or the backdrop)
  *         can lie under a first target, every draw also writes a Z "tag"
  *         (2nd target or not) and first-target layers are drawn twice with a
  *         DECAL depth test (blended over tagged 2nd targets, plain elsewhere).
+ *       The 32-bit path is slow on hardware (docs/RDP_COST.md), so it only
+ *       covers rectangles of 8x8 cells of the region: cells where a first
+ *       target (or semi-transparent OBJ) may have an opaque pixel, from the
+ *       layer cache's per-tile flags and OBJ boxes, and with EVB = 0 only the
+ *       cells that need tags.  Tags are written only in the cells where,
+ *       walking the layers bottom-up, a pixel under a first target may not be
+ *       a 2nd target (a tile without transparent pixels covers what is under
+ *       it).  Everything else (and every layer above the last first target,
+ *       after the final pass) is drawn straight into the display with the
+ *       normal COPY / 1-cycle path; the first targets have no pixel there.
+ *       The game sets BLDCNT for an empty BG0 in its field maps and during
+ *       dialogues, so most "blend" frames end up with no 32-bit work at all.
  *       Approximations (measured by tests/n64_render):
  *         * 132 of the 272 (EVA,EVB>0) pairs have no exact RDP configuration;
  *           they are off by one (at most 2) in some channels for up to 7% of
@@ -267,18 +280,30 @@ void r_bind(int pal, int fx) {
  * the hardware scissor stays at the whole surface and every rectangle is
  * clipped here (which also saves the RDP the hidden pixels). */
 void r_scissor(int gx0, int gy0, int gx1, int gy1) {
-    if (gx0 < R.gx0) gx0 = R.gx0;
-    if (gy0 < R.gy0) gy0 = R.gy0;
-    if (gx1 > R.gx1) gx1 = R.gx1;
-    if (gy1 > R.gy1) gy1 = R.gy1;
+    if (gx0 < R.wx0) gx0 = R.wx0;
+    if (gy0 < R.wy0) gy0 = R.wy0;
+    if (gx1 > R.wx1) gx1 = R.wx1;
+    if (gy1 > R.wy1) gy1 = R.wy1;
     r_clip.tx = R.tx; r_clip.ty = R.ty;
     r_clip.x0 = gx0 + R.tx; r_clip.y0 = gy0 + R.ty;
     r_clip.x1 = gx1 + R.tx; r_clip.y1 = gy1 + R.ty;
 }
 
 void r_scissor_region(void) {
-    r_scissor(R.gx0, R.gy0, R.gx1, R.gy1);
+    r_scissor(R.wx0, R.wy0, R.wx1, R.wy1);
 }
+
+static void set_window(int x0, int y0, int x1, int y1) {
+    R.wx0 = x0 > R.gx0 ? x0 : R.gx0;
+    R.wy0 = y0 > R.gy0 ? y0 : R.gy0;
+    R.wx1 = x1 < R.gx1 ? x1 : R.gx1;
+    R.wy1 = y1 < R.gy1 ? y1 : R.gy1;
+}
+
+/* ------------------------------------------------------------ cell masks */
+
+int cm_w, cm_h;
+
 
 void r_texrect(int gx, int gy, int w, int h, int s, int t, int vflip, int hflip) {
     raw_reserve(2);
@@ -304,7 +329,7 @@ void r_blit_image(const void *buf, int pitch_bytes, tex_format_t fmt, int gx, in
     raw_owner = RAW_OWNER_NONE;
     for (int r0 = 0; r0 < h; r0 += rows) {
         int r1 = r0 + rows > h ? h : r0 + rows;
-        if (gy + r1 <= R.gy0 || gy + r0 >= R.gy1)
+        if (gy + r1 <= R.wy0 || gy + r0 >= R.wy1)
             continue;
         raw_reserve(3);
         raw_put(RAW_SYNC_TILE);
@@ -389,7 +414,69 @@ static void draw_item(int kind, int id, int fx, int mode, uint32_t dispcnt) {
     }
 }
 
-static void final_pass(surface_t *disp) {
+/* Rectangles of the 32-bit blend path, in cells of the region (end exclusive). */
+typedef struct { int16_t i0, j0, i1, j1; } rrect_t;
+#define MAX_RECTS 160
+
+/* GBA coordinates of a rectangle of cells (clipped to the region) */
+static inline void rect_px(const rrect_t *r, int *x0, int *y0, int *x1, int *y1) {
+    *x0 = R.gx0 + 8 * r->i0; *y0 = R.gy0 + 8 * r->j0;
+    *x1 = R.gx0 + 8 * r->i1; *y1 = R.gy0 + 8 * r->j1;
+    if (*x1 > R.gx1) *x1 = R.gx1;
+    if (*y1 > R.gy1) *y1 = R.gy1;
+}
+
+/* Copy the intermediate (pixel (x,y) of the region at x - R.gx0, y - R.gy0)
+ * to the display through the current render mode, in texture loads of
+ * cw x ch pixels: 'bpp' 4 loads RGBA32 texels, 2 loads each pixel as two
+ * RGBA16 texels (for CI8 byte access); s0 = texel offset of the rectangle. */
+static void final_rects(const rrect_t *rl, int nr, int cw, int ch, int as16, int s0, uint32_t dsdx) {
+    const uint64_t w1 = ((uint64_t)(s0 * 32) << 48) | ((uint64_t)dsdx << 16) | 0x400;
+    uint64_t *p = raw_ptr;
+    uint32_t n = 0, bytes = 0;
+    for (int k = 0; k < nr; k++) {
+        int x0, y0, x1, y1;
+        rect_px(&rl[k], &x0, &y0, &x1, &y1);
+        for (int y = y0; y < y1; y += ch) {
+            int ye = y + ch > y1 ? y1 : y + ch;
+            int ly = y - R.gy0, fy = y + R.ty;
+            uint64_t yw = ((uint64_t)((fy + ye - y) * 4) << 32) | (uint64_t)(fy * 4);
+            for (int x = x0; x < x1; x += cw) {
+                int xe = x + cw > x1 ? x1 : x + cw;
+                int lx = x - R.gx0, fx = x + R.tx;
+                if (__builtin_expect(p > raw_end - (5 + 4), 0)) {
+                    raw_ptr = p;
+                    raw_overflow();
+                    p = raw_ptr;
+                }
+                p[0] = RAW_SYNC_TILE;
+                p[1] = RAW_SYNC_LOAD;
+                p[2] = as16 ? raw_load_tile(2, lx * 2, ly, (lx + xe - x) * 2, ly + ye - y)
+                            : raw_load_tile(1, lx, ly, lx + xe - x, ly + ye - y);
+                p[3] = (0x24ull << 56) | ((uint64_t)((fx + xe - x) * 4) << 44) | yw | ((uint64_t)(fx * 4) << 12);
+                p[4] = w1;
+                p += 5;
+                n++;
+                bytes += (uint32_t)((xe - x) * 4 * (ye - y));
+            }
+        }
+    }
+    raw_ptr = p;
+    r_stats.rects += n;
+    r_stats.loads += n; r_stats.load_bytes += bytes;
+}
+
+static uint32_t rects_area(const rrect_t *rl, int nr) {
+    uint32_t a = 0;
+    for (int k = 0; k < nr; k++) {
+        int x0, y0, x1, y1;
+        rect_px(&rl[k], &x0, &y0, &x1, &y1);
+        a += (uint32_t)((x1 - x0) * (y1 - y0));
+    }
+    return a;
+}
+
+static void final_pass(const rrect_t *rl, int nr) {
     /* 32-bit intermediate (v = 4c, up to 255) -> display: min(31, v>>2) */
     rdpq_set_mode_standard();
     rdpq_mode_combiner(RDPQ_COMBINER2((TEX0, 0, PRIM, TEX0), (0, 0, 0, 1),
@@ -399,7 +486,6 @@ static void final_pass(surface_t *disp) {
     rdpq_mode_dithering(DITHER_NONE_NONE);
     pipe_mode = PIPE_NONE;
     pipe_tlut = -1;
-    int w = R.gx1 - R.gx0, h = R.gy1 - R.gy0;
     const int CWF = 64, CHF = 16;               /* 1024 RGBA32 texels = full TMEM (hi/lo halves) */
     raw_reserve(7);
     raw_put(RAW_SYNC_PIPE);
@@ -408,25 +494,9 @@ static void final_pass(surface_t *disp) {
     raw_put(raw_set_tile(RF_RGBA, RS_32, CWF * 2, 0, 1, 0));   /* RGBA32: TMEM line = width*2 */
     raw_put(raw_set_tile(RF_RGBA, RS_32, CWF * 2, 0, 0, 0));
     raw_put(raw_set_tile_size(0, 0, 0, CWF, CHF));
-    for (int y = 0; y < h; y += CHF) {
-        int y1 = y + CHF > h ? h : y + CHF;
-        for (int x = 0; x < w; x += CWF) {
-            int x1 = x + CWF > w ? w : x + CWF;
-            int fx = x + R.gx0 + R.tx, fy = y + R.gy0 + R.ty;
-            raw_reserve(5);
-            raw_put(RAW_SYNC_TILE);
-            raw_put(RAW_SYNC_LOAD);
-            raw_put(raw_load_tile(1, x, y, x1, y1));
-            raw_put((0x24ull << 56) | ((uint64_t)((fx + x1 - x) * 4) << 44) |
-                    ((uint64_t)((fy + y1 - y) * 4) << 32) | ((uint64_t)(fx * 4) << 12) | (uint64_t)(fy * 4));
-            raw_put((0x400ull << 16) | 0x400);          /* s = t = 0, dsdx = dtdy = 1 */
-            r_stats.rects++;
-            r_stats.loads++; r_stats.load_bytes += (uint32_t)((x1 - x) * 4 * (y1 - y));
-        }
-    }
+    final_rects(rl, nr, CWF, CHF, 0, 0, 0x400);
     raw_flush();
-    r_stats.px_2cyc += (uint32_t)(w * h);
-    (void)disp;
+    r_stats.px_2cyc += rects_area(rl, nr);
 }
 
 /* ---- exact model of the blend configuration (see gen_blend_table.py) ---- */
@@ -449,6 +519,9 @@ static int cfg_blend(const blend_cfg_t *b, int p, int m) {
  * result F[v].  Plain pixels are v = 4c; blended values come from the config
  * arithmetic.  Returns the largest blended value. */
 static uint8_t fin_F[256];
+static uint8_t fin_amax[32];            /* largest F of a pixel showing a first target with channel <= a */
+static const blend_cfg_t *fin_cfg;      /* configuration fin_F / fin_amax were built for */
+static int fin_eva, fin_evb;
 static int build_fin_map(const blend_cfg_t *b, int eva, int evb) {
     uint8_t set[256];
     memset(set, 0, sizeof set);
@@ -470,13 +543,16 @@ static int build_fin_map(const blend_cfg_t *b, int eva, int evb) {
 }
 
 /* Exact final pass for intermediates that may exceed the 2x pass range:
- * the intermediate is read as CI8 bytes through a TLUT holding F.
- *   A (2-cycle): TEX0 = R byte, TEX1 = G byte -> writes (F(R), F(G), 0)
- *   B (1-cycle): B byte, blender adds F(B) (at most 30) into blue
- *   C (1-cycle): blender adds 1 more to blue where F(B) = 31
+ * the intermediate is read as CI8 bytes (R, G, B = bytes 0, 1, 2 of a pixel)
+ * through a TLUT holding F.  With bc the "blend channel":
+ *   A (2-cycle): TEX0, TEX1 = the bytes of the two other channels -> writes
+ *                their F, 0 in channel bc
+ *   B (1-cycle): byte bc, the blender adds F (at most 30) into channel bc
+ *   C (1-cycle): the blender adds 1 more where F = 31 (only if F can be 31
+ *                in channel bc: npass = 3)
  * (the blender can add at most 247/8 to an empty channel: P*31/32 with P<=255) */
-static void final_pass_tlut(void) {
-    /* blue increments: smallest texel t whose T8(t)*31/32 lands in [8k, 8k+7] */
+static void final_pass_tlut(const rrect_t *rl, int nr, int bc, int npass) {
+    /* increments: smallest texel t whose T8(t)*31/32 lands in [8k, 8k+7] */
     static uint8_t tk[32];
     if (!tk[1]) {
         for (int k = 0; k < 31; k++)
@@ -485,6 +561,8 @@ static void final_pass_tlut(void) {
                 if (q >= 8 * k && q <= 8 * k + 7) { tk[k] = (uint8_t)t; break; }
             }
     }
+    static const uint8_t shift[3] = { 11, 6, 1 };   /* RGBA5551 position of R, G, B */
+    int c0 = bc == 0 ? 1 : 0, c1 = bc == 2 ? 1 : 2;  /* the two looked-up channels */
     uint64_t *ta = (uint64_t *)fin_tlut, *tb = (uint64_t *)(fin_tlut + 256), *tc = (uint64_t *)(fin_tlut + 512);
     for (int v = 0; v < 256; v += 4) {
         uint64_t wa = 0, wb = 0, wc = 0;
@@ -492,17 +570,17 @@ static void final_pass_tlut(void) {
             uint32_t f = fin_F[v + k];
             uint32_t fb = f > 30 ? 30 : f;
             wa = (wa << 16) | (uint16_t)((f << 11) | (f << 6) | (f << 1) | 1);
-            wb = (wb << 16) | (uint16_t)(f ? ((uint32_t)tk[fb] << 1) | 1 : 0);
-            wc = (wc << 16) | (uint16_t)(f == 31 ? ((uint32_t)tk[1] << 1) | 1 : 0);
+            wb = (wb << 16) | (uint16_t)(f ? ((uint32_t)tk[fb] << shift[bc]) | 1 : 0);
+            wc = (wc << 16) | (uint16_t)(f == 31 ? ((uint32_t)tk[1] << shift[bc]) | 1 : 0);
         }
         ta[v >> 2] = wa; tb[v >> 2] = wb; tc[v >> 2] = wc;
     }
-    int w = R.gx1 - R.gx0, h = R.gy1 - R.gy0;
     uint32_t img = PhysicalAddr(blend_surf.buffer);
     /* loaded as RGBA16 texels (an image is at most 1024 texels wide), drawn as CI8 bytes */
     int img_w = blend_surf.stride / 2;
     const int CW = 64, CH = 8;                      /* 64 pixels = 256 bytes x 8 rows = 2KB */
-    for (int pass = 0; pass < 3; pass++) {
+    uint32_t area = rects_area(rl, nr);
+    for (int pass = 0; pass < npass; pass++) {
         raw_flush();
         rdpq_set_mode_standard();
         rdpq_mode_tlut(TLUT_RGBA16);
@@ -510,8 +588,8 @@ static void final_pass_tlut(void) {
         if (pass == 0) {
             rdpq_mode_combiner(RDPQ_COMBINER2((TEX0, 0, PRIM, 0), (0, 0, 0, 1),
                                               (TEX1, 0, ENV, COMBINED), (0, 0, 0, 1)));
-            rdpq_set_prim_color(RGBA32(255, 0, 0, 255));
-            rdpq_set_env_color(RGBA32(0, 255, 0, 255));
+            rdpq_set_prim_color(RGBA32(c0 == 0 ? 255 : 0, c0 == 1 ? 255 : 0, 0, 255));
+            rdpq_set_env_color(RGBA32(0, c1 == 1 ? 255 : 0, c1 == 2 ? 255 : 0, 255));
         } else {
             rdpq_mode_combiner(RDPQ_COMBINER1((0, 0, 0, TEX0), (0, 0, 0, TEX0)));
             rdpq_mode_alphacompare(1);
@@ -519,6 +597,8 @@ static void final_pass_tlut(void) {
             rdpq_set_fog_color(RGBA32(0, 0, 0, 255));
         }
         rdpq_tex_upload_tlut(fin_tlut + pass * 256, 0, 256);
+        /* texel s of the rectangle: S; TEX0 reads byte S - sl0, TEX1 byte S - sl1 */
+        int S = pass == 0 ? 2 : bc;
         raw_reserve(8);
         raw_put(RAW_SYNC_PIPE);
         raw_put(raw_tex_image(RF_RGBA, RS_16, img_w, img));
@@ -526,30 +606,365 @@ static void final_pass_tlut(void) {
         raw_put(raw_set_tile(RF_RGBA, RS_16, CW * 4, 0, 2, 0));       /* load tile */
         raw_put(raw_set_tile(RF_CI, RS_8, CW * 4, 0, 0, 0));
         raw_put(raw_set_tile(RF_CI, RS_8, CW * 4, 0, 1, 0));
-        raw_put(raw_set_tile_size(0, pass == 0 ? 1 : 0, 0, CW * 4, CH)); /* TEX0: s - 1 / s */
-        raw_put(raw_set_tile_size(1, 0, 0, CW * 4, CH));                 /* TEX1: s */
-        int s0 = pass == 0 ? 1 : 2;
-        for (int y = 0; y < h; y += CH) {
-            int y1 = y + CH > h ? h : y + CH;
-            for (int x = 0; x < w; x += CW) {
-                int x1 = x + CW > w ? w : x + CW;
-                int fx = x + R.gx0 + R.tx, fy = y + R.gy0 + R.ty;
-                raw_reserve(5);
-                raw_put(RAW_SYNC_TILE);
-                raw_put(RAW_SYNC_LOAD);
-                raw_put(raw_load_tile(2, x * 2, y, x1 * 2, y1));
-                r_stats.loads++; r_stats.load_bytes += (uint32_t)((x1 - x) * 4 * (y1 - y));
-                raw_put((0x24ull << 56) | ((uint64_t)((fx + x1 - x) * 4) << 44) |
-                        ((uint64_t)((fy + y1 - y) * 4) << 32) | ((uint64_t)(fx * 4) << 12) | (uint64_t)(fy * 4));
-                raw_put(((uint64_t)(s0 * 32) << 48) | (0ull << 32) | (0x1000ull << 16) | 0x400);
-                r_stats.rects++;
-            }
-        }
-        if (pass == 0) r_stats.px_2cyc += (uint32_t)(w * h); else r_stats.px_1cyc += (uint32_t)(w * h);
+        raw_put(raw_set_tile_size(0, pass == 0 ? 2 - c0 : 0, 0, CW * 4, CH));
+        raw_put(raw_set_tile_size(1, pass == 0 ? 2 - c1 : 0, 0, CW * 4, CH));
+        final_rects(rl, nr, CW, CH, 1, S, 0x1000);
+        if (pass == 0) r_stats.px_2cyc += area; else r_stats.px_1cyc += area;
     }
     raw_flush();
     pipe_mode = PIPE_NONE;
     pipe_tlut = -1;
+}
+
+/* the largest intermediate value of configuration b for first-target
+ * colours with channels <= amax over 2nd targets up to 31 */
+static int cfg_vmax(const blend_cfg_t *b, int amax) {
+    int m = 0;
+    for (int a = 0; a <= amax; a++) {
+        int v = cfg_blend(b, cfg_pixel(b, b->tau[a]), 4 * 31);
+        if (v > m) m = v;
+    }
+    return m;
+}
+
+/* fin_F and fin_amax for configuration b (kept while it does not change) */
+static void fin_prepare(const blend_cfg_t *b, int eva, int evb) {
+    if (b == fin_cfg && eva == fin_eva && evb == fin_evb)
+        return;
+    build_fin_map(b, eva, evb);
+    int m = 0;
+    for (int a = 0; a < 32; a++) {
+        int p = cfg_pixel(b, b->tau[a]);
+        if (fin_F[4 * a] > m) m = fin_F[4 * a];
+        for (int bb = 0; bb < 32; bb++) {
+            int f = fin_F[cfg_blend(b, p, 4 * bb)];
+            if (f > m) m = f;
+        }
+        fin_amax[a] = (uint8_t)m;
+    }
+    fin_cfg = b; fin_eva = eva; fin_evb = evb;
+}
+
+/* ------------------------------------------------------------ frame state */
+
+typedef struct { uint8_t kind, id, fx, l2; } item_t;    /* kind: 0..2 BG kind-1, 3 OBJ */
+static item_t items[4 + 128];           /* draw list in painter's order */
+static int nitems, last_alpha, defer;
+static int n32;                         /* items drawn by the 32-bit path: the rest is above every
+                                         * first target and goes straight to the display */
+/* the cells each item may cover: a bounding box of cells (end exclusive,
+ * empty if i0 >= i1) and, for BG items, an exact mask (bg_touch[item_bg[k]])
+ * (small, so that the masks stay in the 8KB data cache) */
+typedef struct { int16_t i0, j0, i1, j1; } cbox_t;
+static cbox_t item_box[4 + 128];
+static int8_t item_bg[4 + 128];
+static cmask_t bg_touch[4], bg_solid[4];
+static cmask_t fr_cov;                  /* cells where the backdrop is hidden under the first targets */
+static int fr_nalpha;                   /* first-target (FX_ALPHA) items */
+static const cmask_t *fr_asolid;        /* with one: the cells it covers entirely (NULL: none) */
+static int masks_ok;                    /* the region fits the cell masks */
+static uint32_t fr_bd, fr_bd_bright, fr_dispcnt;
+static int fr_bd_tag, fr_bd_defer, fr_mode, fr_obj_bright;
+
+static inline uint64_t span_bits(int i0, int i1) {
+    return (i1 - i0 >= 64 ? ~0ull : (1ull << (i1 - i0)) - 1) << i0;
+}
+
+/* the cells of row j that item k may cover */
+static inline uint64_t item_row(int k, int j) {
+    const cbox_t *b = &item_box[k];
+    if (j < b->j0 || j >= b->j1)
+        return 0;
+    return item_bg[k] >= 0 ? bg_touch[item_bg[k]].r[j] : span_bits(b->i0, b->i1);
+}
+
+/* Cell masks of the frame (masks_ok): reg = cells where a first target may
+ * have an opaque pixel; tg = cells of reg where a pixel under a first target
+ * may belong to a layer that is not a 2nd target (or to the backdrop), i.e.
+ * where the 2nd-target rule needs tags.  Walking the items bottom-up, s is
+ * "every pixel's top layer is a 2nd target" per cell, from the cells each
+ * layer may touch and the cells it covers entirely (text BG tiles without a
+ * transparent pixel). */
+/* the cells item k may cover (item_box, bg_touch) and, for text BGs, the
+ * cells it covers entirely (bg_solid) */
+static void item_masks(int k, int *nbg) {
+    const item_t *it = &items[k];
+    cbox_t *b = &item_box[k];
+    *b = (cbox_t){ 0, 0, 0, 0 };
+    item_bg[k] = -1;
+    if (it->kind == 3) {
+        int x0, y0, x1, y1;
+        if (obj_box(it->id, &x0, &y0, &x1, &y1)) {
+            if (x0 < R.gx0) x0 = R.gx0;
+            if (y0 < R.gy0) y0 = R.gy0;
+            if (x1 > R.gx1) x1 = R.gx1;
+            if (y1 > R.gy1) y1 = R.gy1;
+            if (x0 < x1 && y0 < y1)
+                *b = (cbox_t){ (int16_t)((x0 - R.gx0) >> 3), (int16_t)((y0 - R.gy0) >> 3),
+                               (int16_t)(((x1 - 1 - R.gx0) >> 3) + 1), (int16_t)(((y1 - 1 - R.gy0) >> 3) + 1) };
+        }
+        return;
+    }
+    cmask_t *t = &bg_touch[*nbg], *so = &bg_solid[*nbg];
+    item_bg[k] = (int8_t)(*nbg)++;
+    for (int j = 0; j < cm_h; j++) t->r[j] = so->r[j] = 0;
+    if (it->kind == 0)
+        bg_text_cells(it->id, t, so);
+    else
+        for (int j = 0; j < cm_h; j++) t->r[j] = (1ull << cm_w) - 1;
+    uint64_t any = 0;
+    int j0 = cm_h, j1 = 0;
+    for (int j = 0; j < cm_h; j++)
+        if (t->r[j]) { any |= t->r[j]; if (j < j0) j0 = j; j1 = j + 1; }
+    if (any) {
+        int i0 = 0, i1 = 64;
+        while (!((any >> i0) & 1)) i0++;
+        while (!((any >> (i1 - 1)) & 1)) i1--;
+        *b = (cbox_t){ (int16_t)i0, (int16_t)j0, (int16_t)i1, (int16_t)j1 };
+    }
+}
+
+static void compute_masks(uint32_t l2, cmask_t *reg, cmask_t *tg) {
+    uint64_t full = (1ull << cm_w) - 1;
+    cmask_t s, seen;
+    int nbg = 0;
+    fr_nalpha = 0;
+    fr_asolid = NULL;
+    /* the first targets first: without a cell of theirs nothing else is needed */
+    uint64_t any = 0;
+    for (int j = 0; j < cm_h; j++) reg->r[j] = tg->r[j] = 0;
+    for (int k = 0; k < nitems; k++) {
+        if (items[k].fx != FX_ALPHA) continue;
+        item_masks(k, &nbg);
+        if (fr_nalpha++ == 0)
+            fr_asolid = item_bg[k] >= 0 ? &bg_solid[item_bg[k]] : NULL;
+        for (int j = item_box[k].j0; j < item_box[k].j1; j++) {
+            reg->r[j] |= item_row(k, j);
+            any |= reg->r[j];
+        }
+    }
+    if (!any)
+        return;
+    for (int k = 0; k < nitems; k++)
+        if (items[k].fx != FX_ALPHA) item_masks(k, &nbg);
+    for (int j = 0; j < cm_h; j++) {
+        seen.r[j] = fr_cov.r[j] = 0;
+        s.r[j] = ((l2 >> 5) & 1) ? full : 0;
+    }
+    for (int k = 0; k < nitems; k++) {
+        const item_t *it = &items[k];
+        const cmask_t *so = item_bg[k] >= 0 ? &bg_solid[item_bg[k]] : NULL;
+        int alpha = it->fx == FX_ALPHA;
+        /* (an OBJ only matters in its box: it covers no cell entirely) */
+        int ja = so ? 0 : item_box[k].j0, jb = so ? cm_h : item_box[k].j1;
+        for (int j = ja; j < jb; j++) {
+            uint64_t tj = item_row(k, j), sj = so ? so->r[j] : 0;
+            if (alpha) {
+                tg->r[j] |= tj & ~s.r[j];
+                seen.r[j] |= tj;
+            }
+            fr_cov.r[j] |= sj & ~seen.r[j];
+            if (it->l2) s.r[j] |= sj; else s.r[j] &= ~tj;
+        }
+    }
+}
+
+/* Rectangles covering the set cells of m and no cell of 'avoid': runs of each
+ * cell row (a one-cell gap is bridged unless it is in 'avoid'), stacked into
+ * taller rectangles where consecutive rows have the same run.  -1 if there
+ * would be more than 'max'. */
+static int mask_rects(const cmask_t *m, const cmask_t *avoid, rrect_t *out, int max) {
+    int n = 0;
+    for (int j = 0; j < cm_h; j++) {
+        uint64_t b = m->r[j];
+        b |= ~b & (b << 1) & (b >> 1) & ~avoid->r[j];
+        while (b) {
+            int i0 = r_ctz64(b);
+            uint64_t x = ~(b >> i0);
+            int len = x ? r_ctz64(x) : 64 - i0, i1 = i0 + len;
+            b &= ~((len >= 64 ? ~0ull : (1ull << len) - 1) << i0);
+            int k;
+            for (k = 0; k < n; k++)
+                if (out[k].j1 == j && out[k].i0 == i0 && out[k].i1 == i1) break;
+            if (k < n) {
+                out[k].j1 = (int16_t)(j + 1);
+                continue;
+            }
+            if (n == max) return -1;
+            out[n++] = (rrect_t){ (int16_t)i0, (int16_t)j, (int16_t)i1, (int16_t)(j + 1) };
+        }
+    }
+    return n;
+}
+
+static inline uint64_t rect_bits(const rrect_t *r) {
+    int w = r->i1 - r->i0;
+    return (w >= 64 ? ~0ull : (1ull << w) - 1) << r->i0;
+}
+
+/* Coarse rectangles: in each band of 4 cell rows (32 pixels), one rectangle
+ * from the first to the last set cell of the rows of m, split where a row
+ * of 'other' (whose rows m does not share) comes between. */
+static int band_rects(const cmask_t *m, const cmask_t *other, rrect_t *out) {
+    int n = 0;
+    for (int g = 0; g < cm_h; g += 4) {
+        int ge = g + 4 < cm_h ? g + 4 : cm_h;
+        for (int j = g; j < ge;) {
+            if (!m->r[j]) { j++; continue; }
+            int ja = j, jb = j;
+            uint64_t u = 0;
+            for (; j < ge && !other->r[j]; j++)
+                if (m->r[j]) { u |= m->r[j]; jb = j + 1; }
+            int i0 = r_ctz64(u), i1 = 64;
+            while (!((u >> (i1 - 1)) & 1)) i1--;
+            out[n++] = (rrect_t){ (int16_t)i0, (int16_t)ja, (int16_t)i1, (int16_t)jb };
+        }
+    }
+    return n;
+}
+
+/* may item k cover a cell of rectangle r? */
+static int item_hits(int k, const rrect_t *r) {
+    const cbox_t *b = &item_box[k];
+    if (b->i1 <= r->i0 || b->i0 >= r->i1 || b->j1 <= r->j0 || b->j0 >= r->j1)
+        return 0;
+    if (item_bg[k] < 0)
+        return 1;
+    uint64_t m = rect_bits(r);
+    int j0 = r->j0 > b->j0 ? r->j0 : b->j0, j1 = r->j1 < b->j1 ? r->j1 : b->j1;
+    for (int j = j0; j < j1; j++)
+        if (bg_touch[item_bg[k]].r[j] & m) return 1;
+    return 0;
+}
+
+static int mask_covers(const cmask_t *m, const rrect_t *r) {
+    uint64_t b = rect_bits(r);
+    for (int j = r->j0; j < r->j1; j++)
+        if ((m->r[j] & b) != b) return 0;
+    return 1;
+}
+
+/* draw item k with effect fx in every rectangle it may touch */
+static void draw_rects(int k, int fx, const rrect_t *rl, int nr) {
+    const item_t *it = &items[k];
+    for (int q = 0; q < nr; q++) {
+        if (masks_ok && !item_hits(k, &rl[q])) continue;
+        int x0, y0, x1, y1;
+        rect_px(&rl[q], &x0, &y0, &x1, &y1);
+        set_window(x0, y0, x1, y1);
+        draw_item(it->kind, it->id, fx, fr_mode, fr_dispcnt);
+    }
+}
+
+static inline color_t c4(uint32_t c) {
+    return RGBA32((c & 31) * 4, ((c >> 5) & 31) * 4, ((c >> 10) & 31) * 4, 255);
+}
+
+/* The 32-bit path over the rectangles rl (target attached, R.is32): the
+ * backdrop, then every item in painter's order; with tg, under the tag
+ * scheme (see the top of this file). */
+static void pass32(const rrect_t *rl, int nr, int tg, uint64_t *t_bg, uint64_t *t_obj) {
+    raw_flush();
+    if (tg) {
+        /* backdrop colour and its tag in one 1-cycle fill */
+        rdpq_set_mode_standard();
+        rdpq_mode_combiner(RDPQ_COMBINER_FLAT);
+        rdpq_set_prim_color(c4(fr_bd));
+        rdpq_mode_zoverride(true, 0, 0);
+        rdpq_set_prim_depth_raw((uint16_t)fr_bd_tag, 0);
+        rdpq_mode_zbuf(false, true);
+        for (int q = 0; q < nr; q++) {
+            int x0, y0, x1, y1;
+            rect_px(&rl[q], &x0, &y0, &x1, &y1);
+            rdpq_fill_rectangle(x0 + R.tx, y0 + R.ty, x1 + R.tx, y1 + R.ty);
+            r_stats.px_1cyc += (uint32_t)((x1 - x0) * (y1 - y0));
+        }
+    } else {
+        rdpq_set_mode_fill(c4(fr_bd));
+        for (int q = 0; q < nr; q++) {
+            if (masks_ok && mask_covers(&fr_cov, &rl[q])) continue;
+            int x0, y0, x1, y1;
+            rect_px(&rl[q], &x0, &y0, &x1, &y1);
+            fill_g(x0, y0, x1, y1);
+        }
+    }
+    pipe_mode = PIPE_NONE;
+    pipe_z = -1;
+    z_state = ZT_NONE; z_tag = 0;
+    cmask_t cells;
+    if (masks_ok) {
+        for (int j = 0; j < cm_h; j++) cells.r[j] = 0;
+        for (int q = 0; q < nr; q++)
+            for (int j = rl[q].j0; j < rl[q].j1; j++) cells.r[j] |= rect_bits(&rl[q]);
+    }
+    for (int k = 0; k < n32; k++) {
+        const item_t *it = &items[k];
+        if (masks_ok) {
+            int hit = 0;
+            for (int j = item_box[k].j0; j < item_box[k].j1 && !hit; j++) hit = (item_row(k, j) & cells.r[j]) != 0;
+            if (!hit) continue;
+        }
+        uint64_t ta = get_ticks();
+        int tag = it->l2 ? TAG_TARGET : TAG_NONTARGET;
+        if (!tg) {
+            draw_rects(k, it->fx, rl, nr);
+        } else if (it->fx != FX_ALPHA) {
+            int dfr = defer && it->fx == FX_BRIGHT && it->l2;   /* brightened at the end */
+            z_state = ZT_WRITE; z_tag = dfr ? TAG_DEFERRED : tag;
+            draw_rects(k, dfr ? FX_PLAIN : it->fx, rl, nr);
+        } else {
+            /* first target: blend where the tag under it says 2nd target ... */
+            z_state = ZT_DECAL; z_tag = TAG_TARGET;
+            draw_rects(k, FX_ALPHA, rl, nr);
+            if (defer) {                        /* (raw deferred 2nd targets too) */
+                z_state = ZT_DECAL; z_tag = TAG_DEFERRED;
+                draw_rects(k, FX_ALPHA, rl, nr);
+            }
+            /* ... draw it unblended where it does not (a semi-transparent OBJ
+             * keeps the OBJ layer's brighten/darken there) ... */
+            int nfx = it->kind == 3 && obj_info(it->id)->semi && fr_obj_bright ? FX_BRIGHT : FX_PLAIN;
+            z_state = ZT_DECAL; z_tag = TAG_NONTARGET;
+            draw_rects(k, nfx, rl, nr);
+            /* ... and leave its own tag for first targets drawn later (and
+             * for the deferred brighten, which must not touch it) */
+            if (k < last_alpha || defer) {
+                z_state = ZT_KEEP; z_tag = tag;
+                draw_rects(k, FX_PLAIN, rl, nr);
+            }
+        }
+        if (it->kind == 3) *t_obj += get_ticks() - ta; else *t_bg += get_ticks() - ta;
+    }
+    if (tg && defer) {
+        /* deferred brighten/darken where a deferred layer is still on top: the
+         * backdrop, then the deferred layers in painter's order (at a pixel
+         * the last opaque one is the top layer) */
+        uint64_t ta = get_ticks();
+        if (fr_bd_defer) {
+            raw_flush();
+            rdpq_set_mode_standard();
+            rdpq_mode_combiner(RDPQ_COMBINER_FLAT);
+            rdpq_set_prim_color(c4(fr_bd_bright));
+            rdpq_mode_zoverride(true, 0, 0);
+            rdpq_set_prim_depth_raw(TAG_DEFERRED, 0);
+            rdpq_mode_zbuf(true, false);
+            rdpq_mode_zmode(ZMODE_DECAL);
+            for (int q = 0; q < nr; q++) {
+                int x0, y0, x1, y1;
+                rect_px(&rl[q], &x0, &y0, &x1, &y1);
+                rdpq_fill_rectangle(x0 + R.tx, y0 + R.ty, x1 + R.tx, y1 + R.ty);
+                r_stats.px_1cyc += (uint32_t)((x1 - x0) * (y1 - y0));
+            }
+            pipe_mode = PIPE_NONE;
+            pipe_z = -1;
+        }
+        z_state = ZT_DECAL; z_tag = TAG_DEFERRED;
+        for (int k = 0; k < nitems; k++)
+            if (items[k].fx == FX_BRIGHT && items[k].l2)
+                draw_rects(k, FX_BRIGHT, rl, nr);
+        *t_bg += get_ticks() - ta;
+    }
+    z_state = ZT_NONE;
+    set_window(R.gx0, R.gy0, R.gx1, R.gy1);
 }
 
 int gba_render_busy(void) {
@@ -598,6 +1013,10 @@ void gba_render_frame(surface_t *disp, const gba_view_t *view) {
     if (R.gx1 < R.gx0) R.gx1 = R.gx0;
     if (R.gy1 < R.gy0) R.gy1 = R.gy0;
     R.is32 = 0;
+    set_window(R.gx0, R.gy0, R.gx1, R.gy1);
+    cm_w = (R.gx1 - R.gx0 + 7) >> 3;
+    cm_h = (R.gy1 - R.gy0 + 7) >> 3;
+    masks_ok = cm_w <= 63 && cm_h <= CM_ROWS;
     int fx0 = R.gx0 + R.tx, fy0 = R.gy0 + R.ty, fx1 = R.gx1 + R.tx, fy1 = R.gy1 + R.ty;
 
     /* ---- border ---- */
@@ -684,9 +1103,7 @@ void gba_render_frame(surface_t *disp, const gba_view_t *view) {
     }
 
     /* ---- draw list in painter's order: priority 3..0, BGs (3..0) then OBJs (127..0) ---- */
-    typedef struct { uint8_t kind, id, fx, l2; } item_t;    /* kind: 0..2 BG kind-1, 3 OBJ */
-    static item_t items[4 + 128];
-    int nitems = 0;
+    nitems = 0;
     int bgprio[4];
     for (int n = 0; n < 4; n++)
         bgprio[n] = (int)(io16(REG_BG0CNT + 2 * n) & 3);
@@ -704,7 +1121,8 @@ void gba_render_frame(surface_t *disp, const gba_view_t *view) {
     }
     /* Alpha blending needs the 32-bit path; the 2nd-target rule needs tags when a
      * layer that is not a 2nd target (or the backdrop) may lie under a first target. */
-    int blend32 = 0, tags = 0, last_alpha = -1;
+    int blend32 = 0, tags = 0;
+    last_alpha = -1;
     {
         int nontarget_below = !((l2 >> 5) & 1);
         for (int k = 0; k < nitems; k++) {
@@ -723,7 +1141,8 @@ void gba_render_frame(surface_t *disp, const gba_view_t *view) {
      * TAG_DEFERRED) when a semi-transparent OBJ may lie over it, and is
      * brightened at the end where it is still the top layer.  With effect 2/3
      * the only FX_ALPHA items are semi-transparent OBJs. */
-    int defer = 0, bd_defer = 0;
+    defer = 0;
+    int bd_defer = 0;
     if (effect >= 2) {
         int below = lfx[5] == FX_BRIGHT && ((l2 >> 5) & 1);
         for (int k = 0; k < nitems; k++) {
@@ -735,17 +1154,184 @@ void gba_render_frame(surface_t *disp, const gba_view_t *view) {
             bd_defer = lfx[5] == FX_BRIGHT && ((l2 >> 5) & 1);
         }
     }
-    r_stats.blend_path = (uint32_t)blend32;
-    r_stats.tags = (uint32_t)tags;
+    /* Items above the last first target are not blended and nothing above
+     * them is: the 32-bit path stops there and they are drawn on the display
+     * after the final pass (not with deferred brightening, which needs every
+     * deferred layer in the 32-bit path). */
+    n32 = defer ? nitems : last_alpha + 1;
 
-    /* ---- target + backdrop ---- */
+    /* ---- backdrop ---- */
     uint32_t bd = r_pal16(0), bd_bright = bd;
     if (lfx[5] == FX_BRIGHT) {
         const uint8_t *t = tau_bright;
         bd_bright = t[bd & 31] | (t[(bd >> 5) & 31] << 5) | (t[(bd >> 10) & 31] << 10);
-        if (!bd_defer) bd = bd_bright;
     }
+    fr_bd = bd_defer ? bd : bd_bright;      /* backdrop colour of the 32-bit path */
+    fr_bd_bright = bd_bright;
+    fr_bd_tag = bd_defer ? TAG_DEFERRED : ((l2 >> 5) & 1) ? TAG_TARGET : TAG_NONTARGET;
+    fr_bd_defer = bd_defer;
+    fr_mode = mode; fr_dispcnt = dispcnt; fr_obj_bright = lfx[4] == FX_BRIGHT;
+
+    /* ---- where the 32-bit path is needed ----
+     * Only cells where a first target (or semi-transparent OBJ) may have an
+     * opaque pixel go through it (with EVB = 0 only the cells that need
+     * tags: elsewhere the plain pass applies the fade); everything else is
+     * drawn by the plain pass straight into the display, where the first
+     * targets are left out (they have no pixel there).  Tags are written only
+     * in the cells where a layer that is not a 2nd target may lie under a
+     * first target. */
+    static rrect_t rl_n[MAX_RECTS], rl_t[MAX_RECTS], rl_all[2 * MAX_RECTS];
+    int nrn = 0, nrt = 0, skip_alpha = 0;
+    cmask_t reg;
+    uint64_t full_row = cm_w >= 64 ? ~0ull : (1ull << cm_w) - 1;
+    if (blend32) {
+        uint64_t tm = get_ticks();
+        skip_alpha = alpha_needs_blend;
+        if (masks_ok) {
+            cmask_t T;
+            compute_masks(l2, &reg, &T);
+            if (!alpha_needs_blend || defer) {
+                /* EVB = 0: the plain pass does the fade, the 32-bit path only
+                 * the tagged cells; deferred brighten: all of it tagged */
+                if (defer) T = reg; else reg = T;
+            }
+            cmask_t mn, mt;
+            for (int j = 0; j < cm_h; j++) {
+                mt.r[j] = reg.r[j] & T.r[j];
+                mn.r[j] = reg.r[j] & ~T.r[j];
+            }
+            /* the two sets of rectangles never overlap (a cell drawn by both
+             * passes would be blended twice) */
+            nrn = mask_rects(&mn, &mt, rl_n, MAX_RECTS);
+            nrt = nrn < 0 ? -1 : mask_rects(&mt, &mn, rl_t, MAX_RECTS);
+            if (nrt >= 0 && nrt <= 4 && nrn > 8) {
+                /* many tagless rectangles (every rectangle costs a draw of
+                 * each item it meets): one per band of 4 cell rows where its
+                 * box meets no tagged rectangle, the exact ones elsewhere */
+                cmask_t av, band;
+                for (int j = 0; j < cm_h; j++) av.r[j] = 0;
+                for (int q = 0; q < nrt; q++)
+                    for (int j = rl_t[q].j0; j < rl_t[q].j1; j++) av.r[j] |= rect_bits(&rl_t[q]);
+                nrn = 0;
+                for (int g = 0; g < cm_h && nrn >= 0; g += 4) {
+                    int ge = g + 4 < cm_h ? g + 4 : cm_h, ja = ge, jb = g;
+                    uint64_t u = 0;
+                    for (int j = g; j < ge; j++)
+                        if (mn.r[j]) { u |= mn.r[j]; if (j < ja) ja = j; jb = j + 1; }
+                    if (!u) continue;
+                    int i0 = r_ctz64(u), i1 = 64;
+                    while (!((u >> (i1 - 1)) & 1)) i1--;
+                    rrect_t b = { (int16_t)i0, (int16_t)ja, (int16_t)i1, (int16_t)jb };
+                    uint64_t bm = rect_bits(&b), hit = 0;
+                    for (int j = ja; j < jb; j++) hit |= av.r[j] & bm;
+                    if (!hit) { rl_n[nrn++] = b; continue; }
+                    for (int j = 0; j < cm_h; j++) band.r[j] = j >= g && j < ge ? mn.r[j] : 0;
+                    int k = mask_rects(&band, &av, rl_n + nrn, MAX_RECTS - nrn);
+                    nrn = k < 0 ? -1 : nrn + k;
+                }
+            }
+            if (nrn < 0 || nrt < 0 || nrn + nrt > 16) {
+                /* still too fragmented: a cell row with a tagged cell is
+                 * tagged entirely, and each band of 4 rows is one rectangle
+                 * per set */
+                for (int j = 0; j < cm_h; j++)
+                    if (mt.r[j]) { mt.r[j] = reg.r[j]; mn.r[j] = 0; }
+                nrn = band_rects(&mn, &mt, rl_n);
+                nrt = band_rects(&mt, &mn, rl_t);
+            }
+
+        } else {
+            /* region too large for the cell masks: all of it, as before */
+            rrect_t all = { 0, 0, (int16_t)cm_w, (int16_t)cm_h };
+            if (tags) { rl_t[0] = all; nrt = 1; } else { rl_n[0] = all; nrn = 1; }
+            for (int j = 0; j < CM_ROWS; j++) reg.r[j] = ~0ull;
+        }
+        r_stats.us_track += us_since(tm);
+        if (!nrn && !nrt)
+            blend32 = 0;
+    }
+    tags = nrt > 0;
+    /* cells the 32-bit path draws: the plain pass leaves out items entirely inside them */
+    cmask_t cover;
+    if (blend32 && masks_ok) {
+        for (int j = 0; j < cm_h; j++) cover.r[j] = 0;
+        for (int q = 0; q < nrn; q++)
+            for (int j = rl_n[q].j0; j < rl_n[q].j1; j++) cover.r[j] |= rect_bits(&rl_n[q]);
+        for (int q = 0; q < nrt; q++)
+            for (int j = rl_t[q].j0; j < rl_t[q].j1; j++) cover.r[j] |= rect_bits(&rl_t[q]);
+    }
+    /* The final pass for the colours on screen: the 2x pass when the exact 2x
+     * configuration stays in its range for the first-target colours in view;
+     * else the TLUT pass, with two passes instead of three when every blend
+     * pixel shows the one first target and a channel cannot reach 31. */
+    int fin_bc = 2, fin_npass = 3;
+    if (blend32 && tlut_final && alpha_needs_blend) {
+        uint32_t am[3] = { 0, 0, 0 };
+        for (int k = 0; k < nitems; k++) {
+            if (items[k].fx != FX_ALPHA) continue;
+            uint32_t c = items[k].kind == 0 ? bg_text_colour_max(items[k].id) :
+                         items[k].kind == 3 ? obj_colour_max(items[k].id) : 0x7FFFu;
+            for (int ch = 0; ch < 3; ch++, c >>= 5)
+                if ((c & 31) > am[ch]) am[ch] = c & 31;
+        }
+        int amx = (int)(am[0] > am[1] ? (am[0] > am[2] ? am[0] : am[2]) : (am[1] > am[2] ? am[1] : am[2]));
+        const blend_cfg_t *c2 = &blend_table[eva][evb - 1];
+        if (c2->wrong == 0 && cfg_vmax(c2, amx) <= 191) {
+            bcfg = c2;
+            tlut_final = 0;
+            memcpy(tau_alpha, bcfg->tau, 32);
+            tlut_built[FX_ALPHA][PAL_BG] = tlut_built[FX_ALPHA][PAL_OBJ] = 0;
+            r_stats.blend_wrong = 0;
+        } else if (fr_nalpha == 1 && masks_ok) {
+            int all = 1;
+            if (!fr_asolid) all = 0;
+            for (int q = 0; q < nrn && all; q++) all = mask_covers(fr_asolid, &rl_n[q]);
+            for (int q = 0; q < nrt && all; q++) all = mask_covers(fr_asolid, &rl_t[q]);
+            if (all) {
+                fin_prepare(bcfg, (int)eva, (int)evb);
+                for (int ch = 2; ch >= 0; ch--)
+                    if (fin_amax[am[ch]] <= 30) { fin_bc = ch; fin_npass = 2; break; }
+            }
+        }
+    }
+    r_stats.blend_path = (uint32_t)blend32;
+    r_stats.tags = (uint32_t)tags;
+    r_stats.blend_px = rects_area(rl_n, nrn) + rects_area(rl_t, nrt);
+    r_stats.tag_px = rects_area(rl_t, nrt);
+    r_stats.blend_rects = (uint32_t)(nrn + nrt);
+
+    /* ---- plain pass: the display, rows not entirely drawn by the 32-bit path ---- */
+    uint64_t t_bg = 0, t_obj = 0;
     z_state = ZT_NONE; z_tag = 0;
+    for (int j = 0; j < cm_h;) {
+        int in32 = blend32 && masks_ok && reg.r[j] == full_row;
+        if (blend32 && !masks_ok) in32 = 1;
+        if (in32) { j++; continue; }
+        int j1 = j + 1;
+        while (j1 < cm_h && !(blend32 && masks_ok && reg.r[j1] == full_row)) j1++;
+        set_window(R.gx0, R.gy0 + 8 * j, R.gx1, R.gy0 + 8 * j1);
+        raw_flush();
+        rdpq_set_mode_fill(color_from_packed16(r_conv(bd_bright)));
+        pipe_mode = PIPE_NONE;
+        fill_g(R.wx0, R.wy0, R.wx1, R.wy1);
+        for (int k = 0; k < nitems; k++) {
+            const item_t *it = &items[k];
+            if (skip_alpha && it->fx == FX_ALPHA) continue;
+            if (blend32 && k >= n32) continue;  /* drawn once over everything at the end */
+            if (blend32 && masks_ok) {
+                uint64_t out = 0;
+                for (int q = j; q < j1; q++) out |= item_row(k, q) & ~cover.r[q];
+                if (!out) continue;             /* drawn by the 32-bit path (or after it) */
+            }
+            uint64_t ta = get_ticks();
+            draw_item(it->kind, it->id, it->fx, mode, dispcnt);
+            if (it->kind == 3) t_obj += get_ticks() - ta; else t_bg += get_ticks() - ta;
+        }
+        j = j1;
+    }
+    raw_flush();
+
+    /* ---- 32-bit path over the blend rectangles, then back to the display ---- */
     if (blend32) {
         int bw = R.gx1 - R.gx0, bh = R.gy1 - R.gy0;
         if (!blend_surf.buffer || blend_surf.width < bw || blend_surf.height < bh) {
@@ -765,107 +1351,38 @@ void gba_render_frame(surface_t *disp, const gba_view_t *view) {
         R.is32 = 1;
         R.tx = -R.gx0; R.ty = -R.gy0;
         clip_reset();
-        if (tags) {
-            /* backdrop colour and its tag in one 1-cycle fill */
-            rdpq_set_mode_standard();
-            rdpq_mode_combiner(RDPQ_COMBINER_FLAT);
-            rdpq_set_prim_color(RGBA32((bd & 31) * 4, ((bd >> 5) & 31) * 4, ((bd >> 10) & 31) * 4, 255));
-            rdpq_mode_zoverride(true, 0, 0);
-            rdpq_set_prim_depth_raw(bd_defer ? TAG_DEFERRED : ((l2 >> 5) & 1) ? TAG_TARGET : TAG_NONTARGET, 0);
-            rdpq_mode_zbuf(false, true);
-            rdpq_fill_rectangle(0, 0, bw, bh);
-            r_stats.px_1cyc += (uint32_t)(bw * bh);
-        } else {
-            rdpq_set_mode_fill(RGBA32((bd & 31) * 4, ((bd >> 5) & 31) * 4, ((bd >> 10) & 31) * 4, 255));
-        }
-    } else {
-        rdpq_set_mode_fill(color_from_packed16(r_conv(bd)));
-    }
-    r_scissor_region();
-    if (!tags)
-        fill_g(R.gx0, R.gy0, R.gx1, R.gy1);
-    pipe_mode = PIPE_NONE;
-
-    /* ---- layers ---- */
-    uint64_t t_bg = 0, t_obj = 0;
-    for (int k = 0; k < nitems; k++) {
-        const item_t *it = &items[k];
-        uint64_t ta = get_ticks();
-        int tag = it->l2 ? TAG_TARGET : TAG_NONTARGET;
-        if (!tags) {
-            draw_item(it->kind, it->id, it->fx, mode, dispcnt);
-        } else if (it->fx != FX_ALPHA) {
-            int dfr = defer && it->fx == FX_BRIGHT && it->l2;   /* brightened at the end */
-            z_state = ZT_WRITE; z_tag = dfr ? TAG_DEFERRED : tag;
-            draw_item(it->kind, it->id, dfr ? FX_PLAIN : it->fx, mode, dispcnt);
-        } else {
-            /* first target: blend where the tag under it says 2nd target ... */
-            z_state = ZT_DECAL; z_tag = TAG_TARGET;
-            draw_item(it->kind, it->id, FX_ALPHA, mode, dispcnt);
-            if (defer) {                        /* (raw deferred 2nd targets too) */
-                z_state = ZT_DECAL; z_tag = TAG_DEFERRED;
-                draw_item(it->kind, it->id, FX_ALPHA, mode, dispcnt);
-            }
-            /* ... draw it unblended where it does not (a semi-transparent OBJ
-             * keeps the OBJ layer's brighten/darken there) ... */
-            int nfx = it->kind == 3 && obj_info(it->id)->semi && lfx[4] == FX_BRIGHT ? FX_BRIGHT : FX_PLAIN;
-            z_state = ZT_DECAL; z_tag = TAG_NONTARGET;
-            draw_item(it->kind, it->id, nfx, mode, dispcnt);
-            /* ... and leave its own tag for first targets drawn later (and
-             * for the deferred brighten, which must not touch it) */
-            if (k < last_alpha || defer) {
-                z_state = ZT_KEEP; z_tag = tag;
-                draw_item(it->kind, it->id, FX_PLAIN, mode, dispcnt);
-            }
-        }
-        if (it->kind == 3) t_obj += get_ticks() - ta; else t_bg += get_ticks() - ta;
-    }
-    if (defer) {
-        /* deferred brighten/darken where a deferred layer is still on top: the
-         * backdrop, then the deferred layers in painter's order (at a pixel
-         * the last opaque one is the top layer) */
-        uint64_t ta = get_ticks();
-        if (bd_defer) {
-            raw_flush();
-            rdpq_set_mode_standard();
-            rdpq_mode_combiner(RDPQ_COMBINER_FLAT);
-            rdpq_set_prim_color(RGBA32((bd_bright & 31) * 4, ((bd_bright >> 5) & 31) * 4,
-                                       ((bd_bright >> 10) & 31) * 4, 255));
-            rdpq_mode_zoverride(true, 0, 0);
-            rdpq_set_prim_depth_raw(TAG_DEFERRED, 0);
-            rdpq_mode_zbuf(true, false);
-            rdpq_mode_zmode(ZMODE_DECAL);
-            rdpq_fill_rectangle(0, 0, R.gx1 - R.gx0, R.gy1 - R.gy0);
-            r_stats.px_1cyc += (uint32_t)((R.gx1 - R.gx0) * (R.gy1 - R.gy0));
-            pipe_mode = PIPE_NONE;
-            pipe_z = -1;
-        }
-        z_state = ZT_DECAL; z_tag = TAG_DEFERRED;
-        for (int k = 0; k < nitems; k++)
-            if (items[k].fx == FX_BRIGHT && items[k].l2)
-                draw_item(items[k].kind, items[k].id, FX_BRIGHT, mode, dispcnt);
-        t_bg += get_ticks() - ta;
-    }
-    z_state = ZT_NONE;
-    r_stats.us_bg = (uint32_t)TICKS_TO_US(t_bg) - r_stats.us_raster;
-    r_stats.us_obj = (uint32_t)TICKS_TO_US(t_obj);
-
-    raw_flush();
-    if (blend32) {
+        pipe_mode = PIPE_NONE;
+        pipe_z = -1;
+        if (nrn) pass32(rl_n, nrn, 0, &t_bg, &t_obj);
+        if (nrt) pass32(rl_t, nrt, 1, &t_bg, &t_obj);
+        z_state = ZT_NONE;
+        raw_flush();
         rdpq_detach();
         rdpq_sync_full(NULL, NULL);             /* intermediate fully written */
         R.is32 = 0;
         R.tx = view->ox; R.ty = view->oy;
+        set_window(R.gx0, R.gy0, R.gx1, R.gy1);
         clip_reset();
-        r_scissor_region();
+        int na = 0;
+        for (int k = 0; k < nrn; k++) rl_all[na++] = rl_n[k];
+        for (int k = 0; k < nrt; k++) rl_all[na++] = rl_t[k];
         if (tlut_final) {
-            build_fin_map(bcfg, (int)eva, (int)evb);
-            final_pass_tlut();
-            r_stats.blend_path = 2;
+            fin_prepare(bcfg, (int)eva, (int)evb);
+            final_pass_tlut(rl_all, na, fin_bc, fin_npass);
+            r_stats.blend_path = fin_npass == 2 ? 3 : 2;
         } else {
-            final_pass(disp);
+            final_pass(rl_all, na);
+        }
+        /* the items above every first target, over the whole region */
+        set_window(R.gx0, R.gy0, R.gx1, R.gy1);
+        for (int k = n32; k < nitems; k++) {
+            uint64_t ta = get_ticks();
+            draw_item(items[k].kind, items[k].id, items[k].fx, mode, dispcnt);
+            if (items[k].kind == 3) t_obj += get_ticks() - ta; else t_bg += get_ticks() - ta;
         }
     }
+    r_stats.us_bg = (uint32_t)TICKS_TO_US(t_bg) - r_stats.us_raster;
+    r_stats.us_obj = (uint32_t)TICKS_TO_US(t_obj);
 
 done:
     raw_flush();

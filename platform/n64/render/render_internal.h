@@ -44,13 +44,38 @@ static inline uint16_t r_conv(uint32_t c) {
 
 /* Where the frame is being drawn: the display (16-bit, COPY mode) or the
  * 32-bit blend intermediate (1-cycle mode).  All draw helpers take GBA
- * screen coordinates; (tx,ty) is the target position of GBA pixel (0,0). */
+ * screen coordinates; (tx,ty) is the target position of GBA pixel (0,0).
+ * The region is the whole frame (layer caches and rasters are kept for it);
+ * draws are clipped to the draw window inside it, which the blend path
+ * narrows to the rectangles it renders. */
 typedef struct {
     int tx, ty;
     int gx0, gy0, gx1, gy1;     /* region being drawn, GBA coordinates */
+    int wx0, wy0, wx1, wy1;     /* draw window (inside the region) */
     int is32;
 } rtarget_t;
 extern rtarget_t R;
+
+/* ------------------------------------------------------------ cell masks */
+
+/* One bit per 8x8 cell of the region (cell (i,j) = GBA pixels R.gx0 + 8i..,
+ * R.gy0 + 8j.., clipped to the region), a row of cells per word.  Regions of
+ * up to 504x256 pixels (63 x CM_ROWS cells); larger ones skip the masks. */
+#define CM_ROWS 32
+typedef struct { uint64_t r[CM_ROWS]; } cmask_t;
+extern int cm_w, cm_h;          /* cells across / down the region this frame */
+
+/* index of the lowest set bit of x != 0 (the VR4300 has no instruction for
+ * it and libgcc's __ctzdi2 is a loop) */
+static inline int r_ctz64(uint64_t x) {
+    static const uint8_t db[64] = {
+         0,  1, 48,  2, 57, 49, 28,  3, 61, 58, 50, 42, 38, 29, 17,  4,
+        62, 55, 59, 36, 53, 51, 43, 22, 45, 39, 33, 30, 24, 18, 12,  5,
+        63, 47, 56, 27, 60, 41, 37, 16, 54, 35, 52, 21, 44, 32, 23, 11,
+        46, 26, 40, 15, 34, 20, 31, 10, 25, 14, 19,  9, 13,  8,  7,  6,
+    };
+    return db[((x & (0 - x)) * 0x03F79D71B4CB0A89ull) >> 58];
+}
 
 enum { PAL_BG = 0, PAL_OBJ = 1, PAL_DIRECT = 2 };   /* DIRECT = RGBA16 texels, no TLUT */
 enum { FX_PLAIN = 0, FX_BRIGHT = 1, FX_ALPHA = 2 };  /* colour effect applied to a layer */
@@ -60,9 +85,9 @@ void r_bind(int pal, int fx);
 /* Per-channel 5-bit colour remap for 'fx' (identity for FX_PLAIN); used by
  * CPU-converted direct-colour layers. */
 const uint8_t *r_tau(int fx);
-/* Scissor in GBA coordinates (clipped to the region). */
+/* Scissor in GBA coordinates (clipped to the draw window). */
 void r_scissor(int gx0, int gy0, int gx1, int gy1);
-void r_scissor_region(void);
+void r_scissor_region(void);        /* the whole draw window */
 /* Texture rectangle with TILE0 at GBA coordinates; vflip draws rows bottom-up,
  * hflip columns right-to-left (not in COPY mode: OBJ pipelines only). */
 void r_texrect(int gx, int gy, int w, int h, int s, int t, int vflip, int hflip);
@@ -142,6 +167,12 @@ void bg_invalidate(void);
 void bg_invalidate_layer(int n);
 void bg_track(uint32_t dirty_pages);            /* pages 0..15 */
 void bg_draw_text(int n, int fx);
+/* bring text BG n's cache up to date for the frame and mark the cells where
+ * it may have an opaque pixel (touch) and where every pixel is opaque (solid) */
+void bg_text_cells(int n, cmask_t *touch, cmask_t *solid);
+/* largest channel values (BGR555) of the colours text BG n may show in the
+ * region (from the palette index range of the tiles in view) */
+uint32_t bg_text_colour_max(int n);
 void bg_draw_affine(int n, int fx);             /* mode 1/2 rotation-scaling BG */
 void bg_draw_bitmap(int mode, uint32_t dispcnt, int fx);   /* modes 3/4/5, BG2 */
 #ifdef GBA_RENDER_TRACE
@@ -169,5 +200,10 @@ int obj_parse(uint32_t dispcnt, uint8_t lists[4][128], int counts[4]);
 void obj_prepare(uint8_t lists[4][128], const int counts[4]);
 const objinfo_t *obj_info(int i);
 void obj_draw(int i, int fx);
+/* bounding box (GBA coordinates, end exclusive) of OBJ i's positions over
+ * the region; 0 if it has none */
+int obj_box(int i, int *x0, int *y0, int *x1, int *y1);
+/* largest channel values (BGR555) of the colours OBJ i may show */
+uint32_t obj_colour_max(int i);
 
 #endif

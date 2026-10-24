@@ -15,6 +15,10 @@ ares.
 | `build.sh` | WSL: builds `host_ref`, generates states and references, builds the ROM |
 | `run.sh` | Git Bash: runs the ROM in ares and calls `fbdiff.py` |
 | `fbdiff.py` | Parses the ares log, diffs every dump against its reference, prints the report |
+| `fbcompare.py` | Compares the framebuffer dumps of two runs pixel for pixel (a change against a baseline build) |
+| `rdpcost.py` | RDP cost model: estimated hardware RDP time of the frames a `CMDLOG` build logs (`docs/RDP_COST.md`) |
+| `rdpbench.c` | `RDPBENCH` build: RDP throughput benchmarks to run on real hardware (results on screen) |
+| `capture_states.sh`, `keys/` | WSL: captures the blend-scene game states (rain, sunbeams, dialogue, forest) with the host build |
 | `Makefile` | libdragon build, run from the build directory (see `build.sh`) |
 
 ## Running
@@ -40,7 +44,9 @@ bash tests/n64_render/run.sh
   (PC sampling every 50 us inside `gba_render_frame`, implies the bench flow;
   `-DPROFILE_EXACT` samples single instructions instead of 32-byte lines),
   `-DBENCH_WIDE` (bench / profile the 320x240 view with the hooks of the
-  WIDE test, like the in-game field view)
+  WIDE test, like the in-game field view), `-DRDPQ_VALIDATE -DCMDLOG` (RDP
+  command stream of one steady frame per state, 320x240 and native views, for
+  `rdpcost.py`), `-DRDPBENCH` (hardware RDP benchmarks, see below)
 
 From Git Bash the WSL step is
 `MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu -- bash /home/nara/dbzn64/tests/n64_render/build.sh`.
@@ -75,7 +81,38 @@ and compares every pixel with the GBA formula `min(31, (a*EVA + b*EVB) >> 4)`.
 
 The `rdpEst` column is an estimate from the pixel and load counters (ares does
 not model RDP timing): FILL/COPY 4 px/clk, 1-cycle 1 px/clk, 2-cycle 0.5 px/clk,
-loads 8 bytes/clk, 24 clocks per rectangle and per load, at 62.5 MHz.
+loads 8 bytes/clk, 24 clocks per rectangle and per load, at 62.5 MHz.  These
+are ideal-pipeline numbers; the 32-bit blend path is several times slower on
+hardware.  The `notes` column shows the blend path used (`blend32`: 2x final
+pass, `blend32+tlutfinal(2)`: TLUT final pass in three (two) passes), `tags`
+and `blendpx` (pixels drawn through the 32-bit path).
+
+## RDP cost and regressions
+
+```sh
+# command streams for the cost model (fast: one frame per state and view)
+ONLY="state_04500 state_17400 state_22100 state_22800 state_24000 state_57000" \n  EXTRA_CFLAGS="-DRDPQ_VALIDATE -DCMDLOG" bash tests/n64_render/build.sh OUT
+bash tests/n64_render/run.sh OUT
+python tests/n64_render/rdpcost.py OUT/ares.log                 # estimated ms per state
+python tests/n64_render/rdpcost.py --compare BASE/ares.log OUT/ares.log
+# exactness against a build of another commit (git archive HEAD | tar -x -C DIR):
+python tests/n64_render/fbcompare.py BASE/ares.log NEW/ares.log
+```
+
+`EXTRA_CFLAGS=-DRDPBENCH` builds a ROM that only runs RDP throughput
+benchmarks (fills, COPY / 1-cycle / 2-cycle texture chunks into 16- and 32-bit
+targets, with and without Z and blending, Z buffer in the colour buffer's 1MB
+RDRAM bank and in another one) and shows microseconds per 320x240 pass on
+screen: run it on the console to measure the constants of the cost model.
+
+## Game states for the blend path
+
+`capture_states.sh` replays a new game with the key traces in `keys/` on the
+host build and writes `state_17400` (Pepper Town rain), `state_22100`
+(dialogue outside Goku's house, BG0 empty), `state_22800` and `state_24000`
+(houses with sunbeams), `state_57000` and `state_61000` (the forest, where the
+game keeps BLDCNT set for an empty BG0) into the states directory.  The states
+contain the game's video memory and stay out of the repository.
 
 ## Synthetic states (`mksynth.py`)
 
@@ -99,3 +136,6 @@ loads 8 bytes/clk, 24 clocks per rectangle and per load, at 62.5 MHz.
 | `synth_semi_dark_bd` | the same with darken and the backdrop as 1st + 2nd target |
 | `synth_bgedge` | text BG tiles past the end of BG VRAM, a 512x512 map reaching into OBJ VRAM, 16-bit scrolls |
 | `synth_obj4_many` | 48 4bpp 64x64 OBJs (the per-frame scratch tile area fills several times) |
+| `synth_rain`, `synth_rain_hole` | a solid first target with few colours (16/12) over the whole screen, OBJs below and above it (TLUT final pass in two passes, items above drawn after it); with holes in BG3 (every 7th map entry) the backdrop, not a 2nd target, needs tags in scattered cells: every row gets tagged (worst case) |
+| `synth_sunbeam` | a partial first target with colours below 28 (9/16: the 2x final pass suffices) over a room, backdrop around it |
+| `synth_dialog`, `synth_dialog_corner` | BLDCNT set for an empty BG0 (no 32-bit path) / with a few tiles in one corner (a small one) |

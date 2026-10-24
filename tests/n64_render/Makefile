@@ -10,7 +10,7 @@ LIBDRAGON_PREVIEW = 2
 include $(N64_INST)/include/n64.mk
 
 N64_MKDFS_ROOT := $(BUILD_DIR)/fs
-SRCS := tests/n64_render/main.c tests/n64_render/stubs.c \
+SRCS := tests/n64_render/main.c tests/n64_render/stubs.c tests/n64_render/rdpbench.c \
         $(patsubst $(REPO)/%,%,$(wildcard $(REPO)/platform/n64/render/*.c))
 OBJS := $(addprefix $(BUILD_DIR)/,$(SRCS:.c=.o))
 
