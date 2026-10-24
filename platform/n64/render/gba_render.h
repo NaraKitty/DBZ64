@@ -32,7 +32,8 @@
  *    every frame.
  *
  * Memory (allocated by gba_render_init): BG layer cache 595KB (4 x 512x256
- * CI8 rings + slot tables), BG VRAM shadow 72KB, OBJ shadow + scratch 64KB, raw RDP
+ * CI8 rings + slot tables; rings 2 and 3 are one block that holds the
+ * affine BG texture in modes 1/2), BG VRAM shadow 72KB, OBJ shadow + scratch 64KB, raw RDP
  * command buffer 128KB, scratch 160KB, blend intermediate 300KB + tag buffer
  * 150KB (320x240); affine/bitmap BG raster buffers (75KB each) on first use.
  */
@@ -51,6 +52,9 @@ typedef struct gba_view {
     int (*bg_entry)(int bg, int cx, int cy, uint16_t *entry);
     /* obj_pos: full signed screen position of OAM entry i; return 1 if provided */
     int (*obj_pos)(int i, int *x, int *y);
+    /* bg_affine: affine parameters of BG 'bg' (2/3) for a line outside 0..159:
+       p = {x, y (20.8, sign-extended), pa, pc}; return 1 if provided */
+    int (*bg_affine)(int bg, int line, int32_t p[4]);
 } gba_view_t;
 
 void gba_render_init(void);
@@ -97,6 +101,8 @@ typedef struct gba_render_stats {
     uint32_t blend_wrong;   /* model-predicted wrong (a,b) pairs of the blend config, of 1024 */
     uint32_t dirty_mask;    /* the VRAM pages reported dirty (bit n = 4KB page n) */
     uint32_t obj_units_conv;/* 32-byte OBJ VRAM units converted into the shadows */
+    uint32_t aff_cells;     /* affine BG texture: map cells re-resolved */
+    uint32_t us_aff_update; /* part of us_raster: affine BG texture update */
 } gba_render_stats_t;
 
 const gba_render_stats_t *gba_render_get_stats(void);

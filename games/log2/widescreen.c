@@ -33,6 +33,11 @@
 #include "io.h"
 
 int ws_enabled = 1;
+
+/* the mode-1 world map view (ws_mode1.c) */
+void ws_m1_frame_begin(void);
+int ws_m1_get_view(ws_view_t *v);
+uint32_t ws_m1_generation(void);
 int ws_widen_despawn = 1;
 int ws_hud_inset = 8;
 int ws_debug_flags;
@@ -850,6 +855,7 @@ void ws_frame_begin(void) {
         for (int bg = 0; bg < 4; bg++) lay[bg].type = LAYER_NONE;
         OX = OY = 0;
         last_map_key = 0;
+        ws_m1_frame_begin();            /* the mode-1 world map (ws_mode1.c) */
         return;
     }
     int L = (int)iw32(CAM_SHOWN_L), T = (int)iw32(CAM_SHOWN_T);
@@ -873,7 +879,7 @@ int ws_field_view_active(void) {
 }
 
 uint32_t ws_map_generation(void) {
-    return map_generation;
+    return map_generation + ws_m1_generation();
 }
 
 void ws_native_view(ws_view_t *v) {
@@ -884,7 +890,8 @@ void ws_native_view(ws_view_t *v) {
 
 void ws_get_view(ws_view_t *v) {
     if (!field_on) {
-        ws_native_view(v);
+        if (!ws_m1_get_view(v))
+            ws_native_view(v);
         return;
     }
     view_requested = vblank_count;
@@ -896,6 +903,7 @@ void ws_get_view(ws_view_t *v) {
     v->y1 = OY + WS_H;
     v->bg_entry = ws_bg_entry;
     v->obj_pos = ws_obj_pos;
+    v->bg_affine = NULL;
 }
 
 const ws_stats_t *ws_get_stats(void) {
@@ -959,4 +967,24 @@ void ws_debug_dump_objs(void (*print)(const char *line)) {
                  pos_ok[i] ? pos_x[i] : -9999, pos_ok[i] ? pos_y[i] : -9999);
         print(buf);
     }
+}
+
+/* ------------------------------------------------------------ mode-1 world map */
+
+/* sprite positions with the field rules for a view with the native screen
+ * at (-ox,-oy) (ws_mode1.c) */
+void ws_m1_sprites(int ox, int oy) {
+    OX = ox;
+    OY = oy;
+    compute_obj_positions();
+}
+
+/* OAM entry i's position from ws_m1_sprites() and the vtable of the object
+ * that emitted it (0: unknown) */
+int ws_m1_sprite(int i, int *x, int *y, uint32_t *vt) {
+    if (!ws_obj_pos(i, x, y))
+        return 0;
+    const side_t *s = &side_live[i];
+    *vt = live_valid && s->obj && s->a0 == oam16(i * 8u) && s->a1 == oam16(i * 8u + 2) ? s->vt : 0;
+    return 1;
 }

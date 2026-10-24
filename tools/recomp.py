@@ -59,6 +59,7 @@ TRACE = '--trace' in sys.argv
 # pc -> C function name; filled from game.toml
 OVERRIDE_LOAD = {}      # value loaded at pc is passed through func(value)
 HOOK_BEFORE = {}        # func(const uint32_t regs[15]) runs before pc
+OVERRIDE_REG = {}       # pc -> (reg, func): before pc, rN = func(regs[15])
 NATIVE = {}             # (addr, thumb) -> C function replacing the routine
 
 
@@ -320,6 +321,10 @@ class FuncGen:
         if i.addr in HOOK_BEFORE:
             out.append('{ const uint32_t hr[15] = { r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, '
                        'r11, r12, r13, r14 }; %s(hr); }' % HOOK_BEFORE[i.addr])
+        if i.addr in OVERRIDE_REG:
+            reg, fn = OVERRIDE_REG[i.addr]
+            out.append('{ const uint32_t hr[15] = { r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, '
+                       'r11, r12, r13, r14 }; r%d = %s(hr); }' % (reg, fn))
         body = self.emit_ins_core(i)
         if i.addr in OVERRIDE_LOAD and i.op == 'mem' and i.load and i.rd != 15:
             body = body + ['r%d = %s(r%d);' % (i.rd, OVERRIDE_LOAD[i.addr], i.rd)]
@@ -929,6 +934,8 @@ def main():
         OVERRIDE_LOAD[e['pc']] = e['func']
     for e in cfg.get('hook_before', []):
         HOOK_BEFORE[e['pc']] = e['func']
+    for e in cfg.get('override_reg', []):
+        OVERRIDE_REG[e['pc']] = (int(e['reg']), e['func'])
     for e in cfg.get('native', []):
         NATIVE[(e['addr'], e.get('mode', 'thumb') == 'thumb')] = e['func']
     unreachable = {(e['addr'], e.get('mode', 'thumb') == 'thumb') for e in cfg.get('assume_unreachable', [])}
@@ -971,6 +978,8 @@ def main():
             h.write('uint32_t %s(uint32_t v);\n' % fn)
         for fn in sorted(set(HOOK_BEFORE.values())):
             h.write('void %s(const uint32_t *regs);\n' % fn)
+        for fn in sorted(set(f for _, f in OVERRIDE_REG.values())):
+            h.write('uint32_t %s(const uint32_t *regs);\n' % fn)
         for fn in sorted(set(NATIVE.values())):
             h.write('void %s(void);\n' % fn)
         for f, _ in bodies:

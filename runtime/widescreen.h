@@ -29,8 +29,9 @@
  *     world pixel X = BGxHOFS (all 16 bits, as io16() returns them) + screen x,
  *     cx = X >> 3 (same for Y).  Returns 1 with the tilemap entry to use, or 0:
  *     use the hardware map with its normal wrap ((cx & map_w-1, cy & map_h-1)).
- *     Inside the native screen it always returns 0, so the native area is
- *     drawn from exactly the hardware state.  Outside, field layers come from
+ *     On field maps it always returns 0 inside the native screen, so the
+ *     native area is drawn from exactly the hardware state (the mode-1 world
+ *     map's view moves the minimap's BG cells and also answers there).  Outside, field layers come from
  *     the authored map chunks; cells off the map get a blank (all-zero) tile.
  *     Wrap layers (parallax skies, water) return 0: their hardware ring is the
  *     authored repeat.  Cheap enough to call for every cell of every frame.
@@ -43,7 +44,13 @@
  *     HUD / dialogue objects are re-anchored toward the 320x240 edges.  Hidden
  *     objects get a position far outside the view.
  *
- * Both hooks are only valid between ws_frame_begin() and the next game
+ *   bg_affine(bg, line, p): affine BG 'bg' on a view line outside 0..159 (the
+ *     mode-1 world map's ground plane below the native screen): returns 1 with
+ *     p = {x, y (20.8), pa, pc}, the parameters the game's per-line table
+ *     would hold for that line, or 0: the hardware's (BGxX/Y advanced by
+ *     PB/PD per line).  Lines 0..159 always use the hardware state.
+ *
+ * The hooks are only valid between ws_frame_begin() and the next game
  * instruction (they read guest memory as it was at VBlank).
  *
  * ws_view_t has exactly the layout of gba_view_t (platform/n64/render/
@@ -76,6 +83,7 @@ typedef struct ws_view {
     int x0, y0, x1, y1;    /* region to draw, GBA screen coordinates */
     int (*bg_entry)(int bg, int cx, int cy, uint16_t *entry);
     int (*obj_pos)(int i, int *x, int *y);
+    int (*bg_affine)(int bg, int line, int32_t p[4]);
 } ws_view_t;
 
 /* runtime switches */

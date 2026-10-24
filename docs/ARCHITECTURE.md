@@ -141,11 +141,17 @@ For LoG2 (`games/log2/game.toml`):
   (SWI 2), which is where the game waits for its IRQ flags.
 - The scheduler walks the frame's events:
   - an audio FIFO block every 16 samples (DMA2 IRQ)
-  - HBlank lines, only while the Mode-7 scene's HBlank IRQ is enabled
+  - HBlank lines, only while the mode-1 world map's HBlank IRQ is enabled
   - VBlank at line 160: render and present first, then raise the VBlank IRQ
 - The game's IWRAM IRQ dispatcher (LoG2 0x03000824; `GAME_IRQ_*` in
   `game.h`) is replaced by a native version with the same priority and
   IE/IF/flag semantics. Handlers run as recompiled code.
+- An HBlank handler with a native body (`GAME_HBLANK_NATIVE`: LoG2's line
+  table copy `0x08011F88`) is served in place: the dispatcher's flag word and
+  stack effects are reproduced and the handler runs directly, and all the
+  HBlank lines up to the next other event (audio block, timer, VBlank) go in
+  one batch. This needs the game never to wait for HBlank (its only Halt loop
+  waits for VBlank or DMA2). Same RAM, I/O and audio as the generic path.
 - The BIOS is not executed. SWI 0/2/3/6 are native.
 
 **Native replacements** (`runtime/native.c`, `[[native]]` in `game.toml`):
@@ -160,6 +166,8 @@ For LoG2 (`games/log2/game.toml`):
 | `0x03000520`, `0x03000704` | The sound mixer's voice loop and clip/pack | Hottest audio code |
 | `0x03000480` | Strided 8x8 sprite-tile gather | Per-access translation overhead |
 | `0x080054A4` | Field-layer tilemap rebuild | Replaces ~256 DMAs per frame, and only writes (and dirties VRAM) when a map really changes |
+| `0x08011F88` (`games/log2/native.c`) | Mode-1 HBlank handler: the next line's BG2 affine registers from the line table | Five emulated I/O accesses per line, 228 lines per frame |
+| `0x0801278A` (`games/log2/native.c`) | Mode-1 sky panorama into its hardware map | 64 DMA3 row copies (4 emulated I/O stores each) per frame |
 
 **Audio:**
 - The game's own tracker and mixer run as recompiled code, apart from the
@@ -181,6 +189,15 @@ works in parallel.
 | Logos and title | 1.2–2.4 ms | 0.5–1 ms | ~13 ms |
 | Field, quiet | 5.5 ms | 1.7 ms | ~9 ms |
 | Field, heaviest stretch measured | 6.6–7.1 ms | 3.8–4.0 ms | ~5.5 ms |
+| Mode-1 world map, 320×240 | 7.5–7.9 ms | 9.6 ms heading north, 12–17 ms turning or streaming | none: drawing skips frames |
+| Mode-1 world map, native view (`wsoff`) | 6.5–7.0 ms | 6.4 ms heading north, 7.6–12 ms otherwise | ~0–3 ms |
+
+The world map started at 20 ms of game time (an emulated I/O trap for every
+register access of the per-line HBlank handler, 228 lines a frame) and a
+16 ms draw (14 ms of it the CPU rasteriser for the affine ground). Game time
+is now under 8 ms, so music and game speed stay steady. At 320×240 the
+ground's CPU rasteriser (46,000 pixels, 7–13 ms) keeps the draw over the
+frame budget, and the platform skips drawing to keep the game on time.
 
 On that heaviest stretch, the same frame started this round of work at
 10.5 + 7.5 ms, which missed 60 fps. Mid-game cartridge reads went from 76
@@ -236,7 +253,14 @@ the interpreter (`runtime/interp.c`) a reference for the recompiled code:
   palettes.
 - Saturating additive blends (EVA+EVB > 16) use a half-intensity pass so the
   blender cannot overflow.
-- The Mode-7 layer is drawn in software.
+- Affine BGs are rasterised on the CPU. A wrapping 8bpp affine BG2 of up
+  to 512x512 (the mode-1 world map's ground) is sampled from a resolved
+  texture (map and tiles already looked up, 8x8 tiles in map order) kept in
+  the memory of text rings 2/3, which modes 1/2 do not use, through its
+  cached alias. It follows VRAM through the BG chunk tracking. Per pixel:
+  one load with dilated fixed-point coordinates (three instructions advance
+  both); unrotated lines copy their texel row first; a line with the
+  parameters of the line above is a copy.
 
 **320×240 view:**
 - On field maps, background margins come from the game's authored map chunks.
@@ -244,6 +268,9 @@ the interpreter (`runtime/interp.c`) a reference for the recompiled code:
 - Actor culling bounds are widened at the exact read sites.
 - Sprite coordinates come out of the sprite builder as full signed values.
 - HUD objects are re-anchored to the screen edges.
+- The mode-1 world map fills 320×240 too: the ground plane's per-line table
+  is extended below the screen with the game's own formula, the sky and haze
+  layers are extended, and the minimap moves to the corner.
 - Other screens show the native 240×160 frame centred.
 - Details, verification and limitations: `docs/WIDESCREEN.md`.
 

@@ -137,6 +137,20 @@ addr = 0x03000480
 mode = "arm"
 func = "native_tile_gather"
 
+# mode-1 world map HBlank handler: per-line BG2 affine registers from the
+# line table without five emulated I/O accesses per line (games/log2/native.c)
+[[native]]
+addr = 0x08011F88
+mode = "thumb"
+func = "native_m1_hblank"
+
+# mode-1 sky panorama into its hardware map: 64 DMA3 row copies (4 emulated
+# I/O stores each) per frame done directly (games/log2/native.c)
+[[native]]
+addr = 0x0801278A
+mode = "thumb"
+func = "native_m1_sky_rows"
+
 # ---------------------------------------------------------------- 320x240 view
 # widescreen.c (this directory), docs/WIDESCREEN.md.  Every PC below was
 # checked by disassembly to be the LDR of the camera-rect field named by the
@@ -618,6 +632,73 @@ func = "ws_py_r0"
 [[hook_before]]
 pc = 0x08008E2A
 func = "ws_py_r1"
+
+# ---------------------------------------------------------------- 320x240 mode-1 world map
+# ws_mode1.c.  0x08012520 fills the BG2 per-line table for lines 56..159;
+# before its loop (0x08012612: movs r0, #0x38) the loop invariants are in
+# r12, r14 and at sp+0x14..0x20.  The hook records them (reads only) to
+# extend the table below the native screen.
+[[hook_before]]
+pc = 0x08012612
+func = "ws_m1_hook_table"
+
+# 0x0801204E streams the ground map into VRAM for the camera rect (View+0x0C
+# L, +0x10 T, +0x14 R, +0x18 B, loaded here): widened to the wide view's
+# ground while it is shown
+[[override_load]]
+pc = 0x0801205A
+func = "ws_m1_rect_l"
+[[override_load]]
+pc = 0x08012068
+func = "ws_m1_rect_t"
+[[override_load]]
+pc = 0x08012072
+func = "ws_m1_rect_r"
+[[override_load]]
+pc = 0x0801207C
+func = "ws_m1_rect_b"
+
+# isVisible 0x08012CEE of the world map's ground objects (vt 08025E5C,
+# 08025F90, 08025FB8): the object must lie in the camera rect (loads at
+# 08012D06 L, 08012D0C R, 08012D14 T, 08012D1A B, widened like the streaming
+# rect), then its projected top-left (r0 before the compares at 08012D94 x
+# and 08012DD0 y, already stored) must be in [-2w, 240] x [-2h, 160]: moved
+# into that range when it is in the wide view's [-2w-40, 280] x [-2h-40, 200]
+[[override_load]]
+pc = 0x08012D06
+func = "ws_m1_rect_l"
+[[override_load]]
+pc = 0x08012D0C
+func = "ws_m1_rect_r"
+[[override_load]]
+pc = 0x08012D14
+func = "ws_m1_rect_t"
+[[override_load]]
+pc = 0x08012D1A
+func = "ws_m1_rect_b"
+[[override_reg]]
+pc = 0x08012D94
+reg = 0
+func = "ws_m1_cull_x"
+[[override_reg]]
+pc = 0x08012DD0
+reg = 0
+func = "ws_m1_cull_y"
+
+# isVisible 0x08016BD4 (vt 08025ADC): screen position against the ROM rect
+# {-7,-7,240,160} at 0x086F7A14 (loads at 08016BFE/C04/C0C/C12)
+[[override_load]]
+pc = 0x08016BFE
+func = "ws_m1_srect_l"
+[[override_load]]
+pc = 0x08016C04
+func = "ws_m1_srect_r"
+[[override_load]]
+pc = 0x08016C0C
+func = "ws_m1_srect_t"
+[[override_load]]
+pc = 0x08016C12
+func = "ws_m1_srect_b"
 
 # ---------------------------------------------------------------- ROM cache
 # 16KB ROM pages loaded into the N64 ROM cache at boot (tools/rom_hotset.py

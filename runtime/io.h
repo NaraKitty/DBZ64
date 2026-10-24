@@ -45,6 +45,8 @@ void gba_io_write8(uint32_t off, uint32_t v);
 /* register state of a finished immediate incrementing 16-bit DMA of n
  * units, for natives that copy the data themselves */
 void gba_dma_settle16(int ch, uint32_t sad, uint32_t dad, uint32_t n);
+/* the same for a 32-bit transfer of n words (n >= 1) */
+void gba_dma_settle32(int ch, uint32_t sad, uint32_t dad, uint32_t n);
 
 /* EEPROM (bit-serial over 0x0D000000) */
 int gba_eeprom_active(void);

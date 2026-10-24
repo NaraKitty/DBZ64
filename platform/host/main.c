@@ -6,7 +6,7 @@
  *
  *   dbz --rom baserom.gba [--frames N] [--shot F,F,..] [--every K]
  *       [--out DIR] [--keys "F-F:KEY+KEY;F:KEY"] [--save file] [--wav file]
- *       [--dump-state F,..] [--dump-ram F,..]
+ *       [--dump-state F,..] [--dump-ram F,..] [--poke "F:ADDR=VAL[/SIZE];.."]
  *       [--ws] [--ws-native] [--ws-debug] [--ws-off] [--ws-nodespawn]
  *       [--ws-force-decode] [--ws-decode-test]
  *
@@ -320,7 +320,15 @@ static void ws_run_decode_test(void) {
     fprintf(stderr, "[ws] decode test: %d descriptors, %d failed -> %s\n", n, bad, path);
 }
 
+/* LoG2's mode-1 world map view (games/log2/ws_mode1.c): lines 56..159 whose
+ * hardware snapshot differs from the view's model of the game's line table
+ * (-1: not that screen); other games have none */
+__attribute__((weak)) int ws_m1_debug_check(void) { return -1; }
+
 static void ws_debug_frame(void) {
+    int m1 = ws_m1_debug_check();
+    if (m1 >= 0)
+        fprintf(stderr, "[ws f%d] mode-1 view: line table model %d/104 lines differ\n", frame, m1);
     const ws_stats_t *s = ws_get_stats();
     int cells = 0, bad = ws_debug_check_bg(&cells);
     fprintf(stderr, "[ws f%d] field=%d L=%d T=%d W=%d H=%d OX=%d OY=%d slots=%d (max %d) exact x %d y %d "
@@ -381,6 +389,31 @@ static void dump_ram(const char *path) {
     fclose(f);
 }
 
+/* --poke "F:ADDR=VAL[/SIZE];...": write guest memory at VBlank of frame F
+ * (SIZE 1, 2 or 4 bytes, default 1), e.g. to open a debug menu */
+typedef struct { int frame; uint32_t addr, val; int size; } poke_t;
+static poke_t pokes[64];
+static int npokes;
+
+static void parse_pokes(const char *s) {
+    char *dup = strdup(s), *sv = NULL;
+    for (char *t = strtok_r(dup, ";", &sv); t && npokes < 64; t = strtok_r(NULL, ";", &sv)) {
+        poke_t p = { 0, 0, 0, 1 };
+        if (sscanf(t, "%d:%x=%x/%d", &p.frame, &p.addr, &p.val, &p.size) >= 3)
+            pokes[npokes++] = p;
+    }
+    free(dup);
+}
+
+static void apply_pokes(void) {
+    for (int i = 0; i < npokes; i++)
+        if (pokes[i].frame == frame) {
+            if (pokes[i].size == 4) wr32(pokes[i].addr, pokes[i].val);
+            else if (pokes[i].size == 2) wr16(pokes[i].addr, pokes[i].val);
+            else wr8(pokes[i].addr, pokes[i].val);
+        }
+}
+
 static volatile int frames_since_alarm;
 static time_t t_start;
 
@@ -412,6 +445,7 @@ void plat_frame(void) {
     }
     frame++;
     frames_since_alarm++;
+    apply_pokes();
     uint16_t pressed = 0;
     for (int i = 0; i < nspans; i++)
         if (frame >= spans[i].from && frame <= spans[i].to)
@@ -516,6 +550,7 @@ int main(int argc, char **argv) {
             }
             i++;
         }
+        else if (!strcmp(a, "--poke")) { parse_pokes(v); i++; }
         else if (!strcmp(a, "--save")) { save_path = v; i++; }
         else if (!strcmp(a, "--wav")) { wav_path = v; i++; }
         else if (!strcmp(a, "--rom-profile")) { rom_profile = 1; }
