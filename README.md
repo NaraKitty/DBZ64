@@ -11,7 +11,7 @@
 | Game | Status |
 |---|---|
 | **Dragon Ball Z: The Legacy of Goku II** (USA) | Playable. Runs on real hardware (tested on the Analogue 3D). |
-| **Dragon Ball Z: Buu's Fury** (USA) | In progress: plays at full speed on N64 (in ares) with the RDP renderer, in the native 240×160 view. |
+| **Dragon Ball Z: Buu's Fury** (USA) | In progress: plays at full speed on N64 (in ares) with the RDP renderer, with the 320×240 view on field maps. Not yet tested on hardware. |
 
 This is not an emulator running on the N64. Every ARM and Thumb instruction
 of the original cartridge (2,282 functions, 67,500 instructions for *Legacy of
@@ -35,7 +35,9 @@ emulator.
   centred.
 - **Hardware-accelerated graphics.** The GBA's tile and sprite engine is
   rebuilt on the N64's RDP. It covers background layers, sprites, flips,
-  alpha blending and brightness effects. Its output is pixel-identical to a
+  alpha blending, brightness effects and mosaic; where sprites overlap in
+  ways one-at-a-time drawing gets wrong, their pixels are composited on the
+  CPU first. Its output is pixel-identical to a
   reference software renderer in every frame tested. Translucent effects
   (dialogue boxes, sunbeams, rain) only take the slow blending route in the
   screen cells where they can actually show.

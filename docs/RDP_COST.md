@@ -165,3 +165,34 @@ saturated values span more than the combiner's range).  Its cost is the BG
 layers in 32 bits, the blend and two final passes over 76,800 pixels and
 about 0.9 MB of TMEM loads.  Under the c32 calibration the sunbeam houses
 would also stay above 12 ms.
+
+## Buu's Fury
+
+The same model over the Buu's Fury states of the renderer test (CMDLOG
+build, 72 states; "wide" is the 320x240 region of the WIDE test, which
+draws the hardware maps around the native screen, about what the field view
+draws), estimated ms of RDP time per frame:
+
+| Scene (test state) | BLDCNT, EVA/EVB | wide (z) | native (z) | wide (c32) |
+|---|---|---|---|---|
+| Logos, title, menus, fades (`state_ba01300`, `state_ba112380`) | none, or fades with EVB = 0 | 1.4-1.9 | 1.1-1.7 | 1.4-1.9 |
+| Story scenes (`state_ba02800`, `state_ba03350`) | `0x1E41`, 16/16 | 11.5-13.7 | 8.4-9.6 | 23.4-31.4 |
+| Snake Way dialogue and field play (`state_ba05700`, `state_ba07300`, `state_ba08650`, `state_bv30020`) | `0x1041`, 12/0 | 29-41 | 15-22 | 29-41 |
+| Field play with little BG0 in view (`state_ba10000`, `state_bv60050`) | `0x1041`, 12/0 | 17-19 | 5-6 | 17-19 |
+
+In field play the game sets BLDCNT `0x1041`: BG0 (priority 2) is the first
+target with EVA 12 and EVB 0, and OBJs are the only 2nd target, so BG0 shows
+at 12/16 where an OBJ lies under it and unchanged elsewhere.  EVB = 0 needs
+no blender, but the 2nd-target rule does: every cell where BG0 has a pixel
+and something that is not an OBJ may lie under it is tagged, and that is
+most of the BG0 area (18,000-44,000 of the 76,800 pixels at 320x240).  By
+the model the console would draw about 25-35 of these frames per second in
+the 320x240 view (game speed and sound are paced separately and stay
+steady).  In ares the CPU side costs about 2 ms more per frame than the
+renderer before the blend cells (3.7 instead of 1.6 ms of draw time in
+field play): the plain pass plus the per-rectangle draws of the tagged
+cells.
+
+Not done yet: a cell where no 2nd target can lie under the first target (no
+OBJ box reaches it) needs neither tags nor blending, the first target is
+drawn unchanged there.  Only the cells an OBJ box meets would stay tagged.

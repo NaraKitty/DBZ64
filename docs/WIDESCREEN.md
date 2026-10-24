@@ -821,32 +821,36 @@ Results:
 - **Sprites.** At most 33 of the 128 OAM entries were used, and the overflow
   guard never fired.
 
+Rechecked after the view was merged with the RDP renderer work (natives,
+CPU-composited OBJs, the blend cells): without `--ws` the build with the
+view is identical to the one before it (gameplay script, `fuzz_all1`, the
+explorer path and `fuzz_field3`: 1,038 files, PNGs, RAM dumps, WAVs and
+saves); `--ws --ws-off` is the native frame at (40,40) in 778 frames;
+margins decoded from ROM equal the loaded ones in 778 frames; 0 bad cells
+in 620 field frames (1,192,780 cells).
+
 ### N64
 
 The N64 build always asks for the view, which turns the widening on.
 
-**ROM cache.** The RDP renderer's buffers leave about 0.9 MB of heap. Next to
-Buu's 3.3 MB of code, the 2 MB ROM cache of `platform/n64/main.c` does not fit:
-"cannot allocate the ROM cache". The tests used a scratch copy of the sources
-with a 512 KB cache.
-
 **Results.** In ares, every 320x240 screenshot equals the host `--ws` frame
-at 5-bit precision. Each run must start with a blank cartridge SRAM: ares
-keeps it next to the test ROM (`dbz_test.ram` in the build directory), so a
-run that follows one that saved starts from that save, while the host runs
-start without one. The explorer path writes a game-progress save. The
-screenshots:
+at 5-bit precision, with the normal ROM cache (1264 KB in this build). Each
+run must start with a blank cartridge SRAM: ares keeps it next to the test
+ROM (`dbz_test.ram` in the build directory), so a run that follows one that
+saved starts from that save, while the host runs start without one. The
+explorer path writes a game-progress save. The screenshots:
 - 13 of the gameplay script: intro scroll, dialogue, Snake Way with HUD, menu
 - 16 of `fuzz_all1`: snake head, King Yemma's palace and office, beam, menus
 - 19 of the explorer path: the room behind King Yemma's office, the plane,
   West City, and two paused-field frames (targeting mode on Snake Way and in
-  West City). This run started from the save an earlier run left (the pixels
-  match anyway) and used the code before the beam's camera test; the host
-  frames at these 19 shots are the same with and without that test.
+  West City)
 
-The test builds render with the RDP renderer. On the explorer path, with the
-512 KB ROM cache, the game took 7 ms per frame in ares (median of the
-120-frame averages; the highest was 13 ms).
+CPU time in ares with the view (game + draw, means of the 120-frame windows
+of the gameplay script, every frame drawn): Snake Way field play 5.4 + 4.1
+ms (heaviest window 11.8 ms), dialogue with portraits 6.7 + 4.3 ms; the
+native view costs 0.8-1.2 ms less game time.  On the explorer path (frames
+not drawn) the game took 5.7 ms per frame (median; the highest window 9.2
+ms).
 
 ### Limitations
 
@@ -865,5 +869,10 @@ The test builds render with the RDP renderer. On the explorer path, with the
 - **Targeting mode.** While B is held, the reticle stops at the native
   screen's edge, and targets in the margin cannot be picked (see above).
 - **Despawn widening is a gameplay change by design**, as in LoG2.
-- **N64 memory.** The RDP build does not fit until the ROM cache or the
-  renderer's memory shrinks. That belongs to the RDP bring-up for Buu's Fury.
+- **RDP time on hardware.** The field's blend frames (BLDCNT `0x1041`) tag
+  most of BG0's cells in the 32-bit path; the cost model puts them at 29-41
+  ms of RDP time per frame at 320x240 (`docs/RDP_COST.md`, "Buu's Fury").
+- **Not ported from LoG2's later work:** continuous HUD anchoring (a cluster
+  still snaps to the left/centre/right and top/middle/bottom third of the
+  screen, so a box sliding across a third jumps) and the margin fill of maps
+  smaller than the view.

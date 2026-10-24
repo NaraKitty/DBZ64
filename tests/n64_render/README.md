@@ -114,6 +114,11 @@ host build and writes `state_17400` (Pepper Town rain), `state_22100`
 game keeps BLDCNT set for an empty BG0) into the states directory.  The states
 contain the game's video memory and stay out of the repository.
 
+Buu's Fury states (`--dump-state` of its host build, renamed to any
+`state_*.bin` that does not clash with the LoG2 names) go into the same
+directory: the renderer is shared, and a run over both games' states is the
+check for renderer changes.
+
 ## Synthetic states (`mksynth.py`)
 
 | State | Covers |

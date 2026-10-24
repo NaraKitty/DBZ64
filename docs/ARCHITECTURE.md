@@ -71,14 +71,16 @@ during scan-out on hardware. The game state in RAM is identical apart from
 sound-mixer timing, the stack and a CPU-load meter (0x03000FEC). Saves
 match byte for byte. Option
 changes are saved to EEPROM and read back at boot. The N64 build with the
-RDP renderer runs the same script in ares with every checked frame (55,
-from the logos to the options menu) identical to the host's, and keeps the
-save in SRAM. CPU time in ares: field play 4.5 ms game + 1.7 ms draw,
-dialogue with portraits 5.5 + 2.1 ms, the animated title 5.4 + 0.9 ms
-(measurements below). Code is 3.4 MB of MIPS and BSS 1.15 MB; the ROM
-cache gets the remaining 1.2 MB.
+RDP renderer runs the same script in ares with every checked frame
+identical to the host's (128 checkpoints from the logos to Snake Way in the
+native view; 48 screenshots of three runs in the 320×240 field view), and
+keeps the save in SRAM. CPU time in ares: field play 5.4 ms game + 4.1 ms
+draw at 320×240 (4.5 + 3.7 ms in the native view), dialogue with portraits
+6.7 + 4.3 ms, logos and the animated title 3.4 + 1.1 ms (measurements
+below). Code is 3.5 MB of MIPS and BSS 1 MB; the ROM cache gets 1.26 MB.
 
-Open: the Mode-7 style overworld (HBlank per-line BG2
+Open: the field's blend frames are expensive for the RDP (see
+"Measurements"); the Mode-7 style overworld (HBlank per-line BG2
 affine) and the scenes that write MOSAIC were not reached with scripted
 input (the renderer's per-line affine and mosaic paths are checked with
 synthetic states); register summaries of the ARM soft-float routines
@@ -140,8 +142,12 @@ For LoG2 (`games/log2/game.toml`):
   - Clean VRAM is write-protected in the TLB, so the first write to a page
     marks it dirty for the renderer.
 - ROM lives on the cartridge and is paged into a cache in 16 KB pages
-  (`platform/n64/rom_n64.c`): what the heap has left after code, BSS, the
-  renderer and the game stack, at most 2 MB (LoG2 2 MB, Buu's Fury 1.2 MB).
+  (`platform/n64/rom_n64.c`), at most 2 MB (LoG2 2 MB, Buu's Fury 1.26 MB):
+  the RAM between `.sbss` and `.bss`, which the 256 KB alignment of guest
+  memory leaves unused (0–256 KB depending on the code size), then what the
+  heap has left after the renderer and the game stack. The N64 Makefile
+  links with a copy of libdragon's `n64.ld` that puts guest memory first in
+  `.bss` (`platform/n64/bss_gap.ld`), so no padding is left inside `.bss`.
   - A miss is a PI DMA with interrupts off. The game's hot pages
     (`game.toml` `[rom] preload`, found with `tools/rom_hotset.py` from host
     traces) are therefore loaded at boot; at most 7/8 of the cache is
@@ -229,30 +235,28 @@ On that heaviest stretch, the same frame started this round of work at
 10.5 + 7.5 ms, which missed 60 fps. Mid-game cartridge reads went from 76
 to 0 over the scripted playthrough.
 
-Buu's Fury (native 240×160 view, RDP renderer; means of the 120-frame
-windows of each scene of the gameplay script, then a 16,600-frame stretch
-of random field play):
+Buu's Fury (RDP renderer; means of the 120-frame windows of each scene of
+the gameplay script, every frame drawn):
 
-| Scene | Game | Draw | Before this round (game + draw) |
+| Scene | Native view: game + draw | 320×240 field view: game + draw | Before the merge with the blend cells (native) |
 |---|---|---|---|
-| Logos | 2.1 ms | 0.7 ms | 2.1 + 0.7 ms |
-| Title (animated, decoded every frame) | 5.4 ms | 0.9 ms | 6.8 + 0.9 ms |
-| Story intro scenes | 4.1–4.2 ms | 1.0–2.5 ms | 4.8–5.4 + 2.0–2.9 ms |
-| Snake Way dialogue with portraits | 5.5 ms | 2.1 ms | 7.1 + 3.5 ms |
-| Snake Way field play | 4.5 ms | 1.7 ms | 5.7 + 2.5 ms |
-| Status, journal, options | 3.3 ms | 0.8 ms | 3.5 + 0.9 ms |
-| Random field play, median window | 4.5 ms | 1.5 ms | 5.7 + 2.2 ms |
-| Random field play, heaviest window | 5.6 ms | 2.0 ms | 8.9 + 2.2 ms (with ROM cache misses) |
+| Logos and the animated title | 3.5 + 1.0 ms | 3.4 + 1.1 ms | 3.3 + 0.8 ms |
+| Story intro scenes | 4.2 + 1.5 ms | 4.8 + 1.6 ms | 4.0 + 1.4 ms |
+| Snake Way dialogue with portraits | 5.5 + 4.3 ms | 6.7 + 4.3 ms | 5.2 + 2.0 ms |
+| Snake Way field play | 4.5 + 3.7 ms | 5.4 + 4.1 ms (heaviest 11.8 ms) | 4.3 + 1.6 ms |
 
-"Before" is 34d29df, whose RDP build ran out of RDRAM for the 2 MB ROM
-cache (it is measured with the cache cut to 768 KB, which then missed 930
-times in that random stretch).  The ROM cache now misses none during the
-script's field play, and 12-14 times in the random stretch: field play
-there touches 77 pages, more than the 76 the cache holds, so pages evicted
-earlier come back (at most 4 of those misses are first uses).  The story
-intro misses at its scene changes (about 90 pages in ares; the script
-touches 118 pages).  LoG2 over the same round: its heaviest stretch 9.2 ->
-8.7 ms (game + draw), quiet field play unchanged.
+"Before" is the renderer before the blend cells (part A of the Buu's Fury
+bring-up, measured the same way).  The draw time of dialogue and field play
+grew by about 2 ms: the game keeps BLDCNT `0x1041` there (BG0 a first
+target at 12/0, OBJs the 2nd target), and the 2nd-target rule makes most
+of BG0's cells go through the tagged 32-bit path (a plain pass plus one
+draw per rectangle).  On the console that path is the expensive part
+(estimated 15-22 ms of RDP time per frame in the native view and 29-41 ms
+at 320×240, `docs/RDP_COST.md`), so these frames are RDP-bound there.
+The gameplay script misses the ROM cache 78 times in the native build
+(93 with the view), almost all at the story's scene changes (part A: 113).
+LoG2 over the same merge (its 8000-frame timing script): field play 5.2 +
+1.5 ms and the heaviest window 9.7 ms (main: 5.3 + 1.5 and 10.1 ms).
 
 **Pacing** (`platform/n64/main.c`, `frame_pace`): the game runs on its own
 real-time schedule, one GBA frame per 267.52 audio samples at the AI's
@@ -269,10 +273,12 @@ the queue is refilled with silence at once.
 
 **Memory:**
 - Code: 1.66 MB of MIPS from 67.5k guest instructions, with TLB-mapped memory
-  accesses (Buu's Fury: 3.4 MB).
-- BSS: 1.15 MB in both games (1.6 MB before the N64 build dropped the
-  guest page tables).
-- ROM page cache: 2 MB (Buu's Fury: 1.2 MB, what is left).
+  accesses (Buu's Fury: 3.5 MB).
+- BSS: 0.9 MB (Buu's Fury: 1 MB), of which guest memory is 512 KB. It was
+  1.6 MB while the N64 build kept guest page tables and guest memory sat
+  behind 255 KB of padding.
+- ROM page cache: 2 MB, with 1 MB of heap to spare (Buu's Fury: 1.26 MB,
+  what is left).
 - The game stack's top is placed at offset 0x1000 of the D-cache's 8 KB
   index space; where it falls was worth up to 1.2 ms per frame.
 
@@ -337,9 +343,14 @@ the interpreter (`runtime/interp.c`) a reference for the recompiled code:
   of a rectangle are composited on the CPU with the reference renderer's
   rules: a later OBJ with a better priority over an earlier one (its
   transparent texels still pass their priority down), OBJ mosaic, and an
-  OBJ that blends over another OBJ.
-- BG mosaic: text BGs with mosaic are drawn in software, affine and bitmap
-  BGs apply it in their software raster.
+  OBJ that blends over another OBJ. The composed pixels are drawn as one
+  item per (priority, semi-transparency) and take part in the blend cells
+  like any OBJ (their cells: the boxes of the OBJs with that code inside the
+  rectangle); the other OBJs are clipped around the rectangle.
+- BG mosaic: text BGs with mosaic are drawn in software (every cell counts
+  as touched for the blend cells), affine and bitmap BGs apply it in their
+  software raster (an affine BG2 with mosaic never uses the resolved
+  texture).
 
 **320×240 view:**
 - On field maps, background margins come from the game's authored map chunks.
@@ -351,6 +362,8 @@ the interpreter (`runtime/interp.c`) a reference for the recompiled code:
   is extended below the screen with the game's own formula, the sky and haze
   layers are extended, and the minimap moves to the corner.
 - Other screens show the native 240×160 frame centred.
+- Buu's Fury has the same field view (its own addresses and hook sites);
+  its other screens, the Mode-7 style overworld included, stay native.
 - Details, verification and limitations: `docs/WIDESCREEN.md`.
 
 **Controls:**
