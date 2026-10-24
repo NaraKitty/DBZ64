@@ -259,9 +259,9 @@ static const uint8_t *quad_ptr(uint32_t a) {
  * 0..y-1 from 2 and 3: 64 memcpy16 calls per layer and frame, which mostly
  * rewrite what is already there.  Here rows that match are skipped, so the
  * map's VRAM is marked dirty only when it changes.
- * The exit is what the recompiled routine leaves: r0 = x, or the last
- * row's destination when quadrant 3 was copied; r1-r3 from the last
- * memcpy16; r4-r7 popped (pushed as 0: not inputs); r14 = the return
+ * The exit is what the recompiled routine leaves: r0 = x, or where the last
+ * row's copy ended (memcpy16's r0) when quadrant 3 was copied; r1-r3 from
+ * the last memcpy16; r4-r7 popped (pushed as 0: not inputs); r14 = the return
  * address of the last call; flags Z and C (every path ends with an equal
  * compare).  The stack frame (pushed registers and the locals) is written
  * as the routine writes it. */
@@ -333,7 +333,7 @@ void native_field_map_stream(void) {
     cpu.r[2] = bytes - 16 * ((bytes + 15) / 16);
     if (last_fast)
         cpu.r[3] = rd16(src + bytes - 2);
-    cpu.r[0] = (x && y) ? sb + lr * 64 : x;
+    cpu.r[0] = (x && y) ? sb + lr * 64 + 2 * l->c0 + bytes : x;
     cpu.r[4] = cpu.r[5] = cpu.r[6] = cpu.r[7] = 0;
     cpu.r[14] = l->ret;
     cpu.n = 0;
