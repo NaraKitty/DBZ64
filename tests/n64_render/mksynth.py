@@ -666,6 +666,97 @@ def st_semi_dark_bd():
     return s
 
 
+def set_bit(s, off, bit):
+    v = struct.unpack_from('<H', s.io, off)[0]
+    s.r(off, v | bit)
+
+
+def st_mosaic_bg():
+    """Text BG mosaic (BG0 4bpp with banks, BG1 8bpp 512 wide, BG3 512x512
+    with a 16-bit scroll; BG2 without the bit), plus mosaic OBJs."""
+    s = st_bgtext()
+    for n in (0, 1, 3):
+        set_bit(s, 0x08 + 2 * n, 0x40)
+    obj_vram_random(s)
+    i = sprites_grid(s)
+    for k in range(0, i, 2):                     # every other OBJ uses mosaic
+        a0 = struct.unpack_from('<H', s.oam, k * 8)[0]
+        struct.pack_into('<H', s.oam, k * 8, a0 | 0x1000)
+    s.r(0x4C, 3 | (5 << 4) | (2 << 8) | (6 << 12))   # BG 4x6, OBJ 3x7
+    s.r(0x00, 0x1F40)
+    return s
+
+
+def st_mosaic_obj():
+    """OBJ mosaic: regular (flips, 4bpp/8bpp, 1D) and affine OBJs, OBJs off
+    the left/top edges (the grid runs from negative screen coordinates)."""
+    s = st_affobj()
+    for k in range(12):
+        a0 = struct.unpack_from('<H', s.oam, k * 8)[0]
+        struct.pack_into('<H', s.oam, k * 8, a0 | (0x1000 if k % 3 else 0))
+    obj_vram_random(s, transp=0.3)
+    for k in range(8):                           # regular OBJs, some partly off-screen
+        x, y = (k * 31 - 12) & 0x1FF, (k * 19 - 8) & 0xFF
+        s.obj(20 + k, y | 0x1000 | (0x2000 if k % 2 else 0) | (0 << 14),
+              x | (2 << 14) | ((k % 4) << 12), (k * 64) & 0x3FF | ((k % 4) << 10) | ((k % 16) << 12))
+    s.r(0x4C, (4 << 8) | (2 << 12))              # OBJ 5x3
+    return s
+
+
+def st_mosaic_mode7():
+    """Mode-1 BG2 with per-line parameters and mosaic (vertical blocks take
+    the first line's parameters), BG1 per-line scroll with mosaic."""
+    s = st_mode7()
+    set_bit(s, 0x0C, 0x40)
+    set_bit(s, 0x0A, 0x40)
+    s.r(0x4C, 2 | (3 << 4))                      # BG 3x4
+    return s
+
+
+def st_mosaic_mode4():
+    """Bitmap mode 4, scaled, with BG2 mosaic."""
+    s = st_mode4(1, True)
+    s.r(0x0C, 0x0040)
+    s.r(0x4C, 5 | (1 << 4))                      # BG 6x2
+    return s
+
+
+def st_mosaic_mode3():
+    """Bitmap mode 3 (direct colour) with darken and BG2 mosaic."""
+    s = st_mode3()
+    set_bit(s, 0x0C, 0x40)
+    s.r(0x4C, 1 | (6 << 4))                      # BG 2x7
+    return s
+
+
+def st_objprio():
+    """The OBJ layer's transparent-texel priority rule: earlier OBJs with a
+    worse priority under later ones (semi-transparent too, with an alpha
+    blend), over BGs of every priority, and affine and 4bpp OBJs."""
+    s = St()
+    rnd_pal(s)
+    background(s, bg=3, prio=3, sb=31)
+    tiles8(s, 64 * 64, 64, transp=0.5)
+    for o in range(0x400):
+        s.v16(30 * 0x800 + o * 2, 64 + R.randrange(64))
+    s.r(0x0A, 0x80 | (30 << 8) | 1)              # BG1 partly transparent, prio 1
+    obj_vram_random(s, transp=0.5)
+    i = 0
+    for k in range(10):
+        x, y = 8 + k * 22, 10 + (k % 3) * 40
+        # an earlier OBJ with priority 3, then a later one with priority 0..2
+        s.obj(i, y | 0x2000 | (0x400 if k % 4 == 1 else 0), x | (1 << 14), (k * 40) & 0x3FF | (3 << 10)); i += 1
+        s.obj(i, (y + 6) | (0x2000 if k % 2 else 0) | (0x400 if k % 3 == 2 else 0), (x + 5) | (1 << 14),
+              (k * 40 + 300) & 0x3FF | ((k % 3) << 10) | ((k % 16) << 12)); i += 1
+    s.aff(0, 300, 40, -50, 230)
+    s.obj(i, 120 | 0x100 | 0x200 | 0x2000, 60 | (0 << 9) | (2 << 14), 500 | (3 << 10)); i += 1
+    s.obj(i, 130 | 0x100 | 0x2000, 80 | (0 << 9) | (2 << 14), 640 | (1 << 10)); i += 1
+    s.r(0x50, 0x0A50)                            # alpha: 1st OBJ (and semi), 2nd BG1 BG3
+    s.r(0x52, 9 | (7 << 8))
+    s.r(0x00, 0x1A40)
+    return s
+
+
 def main():
     out = sys.argv[1]
     os.makedirs(out, exist_ok=True)
@@ -705,6 +796,12 @@ def main():
         'synth_sunbeam': st_sunbeam(9, 16),
         'synth_dialog': st_dialog(True),
         'synth_dialog_corner': st_dialog(False),
+        'synth_mosaic_bg': st_mosaic_bg(),
+        'synth_mosaic_obj': st_mosaic_obj(),
+        'synth_mosaic_mode7': st_mosaic_mode7(),
+        'synth_mosaic_mode4': st_mosaic_mode4(),
+        'synth_mosaic_mode3': st_mosaic_mode3(),
+        'synth_objprio': st_objprio(),
     }
     for name, s in states.items():
         s.save(os.path.join(out, name + '.bin'))

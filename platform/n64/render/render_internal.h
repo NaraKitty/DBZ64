@@ -165,10 +165,12 @@ void *r_raster_buf(int which, uint32_t bytes);
 void bg_init(void);
 void bg_invalidate(void);
 void bg_invalidate_layer(int n);
-void bg_track(uint32_t dirty_pages);            /* pages 0..15 */
+/* pages 0..15; units: noted 32-byte units of BG VRAM (64 words) or NULL */
+void bg_track(uint32_t dirty_pages, const uint32_t *units);
 void bg_draw_text(int n, int fx);
 /* bring text BG n's cache up to date for the frame and mark the cells where
- * it may have an opaque pixel (touch) and where every pixel is opaque (solid) */
+ * it may have an opaque pixel (touch) and where every pixel is opaque (solid);
+ * with mosaic every cell may be touched and none is solid */
 void bg_text_cells(int n, cmask_t *touch, cmask_t *solid);
 /* largest channel values (BGR555) of the colours text BG n may show in the
  * region (from the palette index range of the tiles in view) */
@@ -188,12 +190,14 @@ typedef struct {
     uint8_t prio, semi, bpp8, hf, vf, affine, ident, own_pos;
     uint16_t tile;
     uint8_t pbank;          /* OBJ palette bank (4bpp) */
+    uint8_t mosaic;         /* attr0 mosaic bit */
     int32_t pa, pb, pc, pd;
 } objinfo_t;
 
 void obj_init(void);
 void obj_invalidate(void);
-void obj_track(uint32_t dirty_pages);           /* pages 16..23 as bits 0..7 */
+/* pages 16..23 as bits 0..7; units: noted units of OBJ VRAM (32 words) or NULL */
+void obj_track(uint32_t dirty_pages, const uint32_t *units);
 /* parse OAM; returns per-priority lists of visible OBJ indices in draw order (127..0) */
 int obj_parse(uint32_t dispcnt, uint8_t lists[4][128], int counts[4]);
 /* bring the OBJ shadow up to date for the listed sprites (render_obj.c) */
@@ -205,5 +209,26 @@ void obj_draw(int i, int fx);
 int obj_box(int i, int *x0, int *y0, int *x1, int *y1);
 /* largest channel values (BGR555) of the colours OBJ i may show */
 uint32_t obj_colour_max(int i);
+/* The OBJ layer composited on the CPU (render_obj.c).  Painter's order is
+ * not the GBA's OBJ layer where an OBJ with a better priority follows an
+ * earlier one in OAM order (its transparent texels still pass their
+ * priority down, see ppu_soft), where an OBJ uses mosaic, and, with alpha
+ * blending, where an OBJ that blends (semi-transparent; with
+ * OBJ_CPU_BLEND_ALL every OBJ, the OBJ layer being a first target) covers
+ * another OBJ: the GBA blends the OBJ layer's top pixel with the BG
+ * beneath, not with the OBJ beneath.  obj_cpu_begin finds the rectangle
+ * covering those places; inside it every OBJ pixel comes from a CPU
+ * composition (ppu_soft's rules), drawn per (priority, semi) as obj_cpu_draw
+ * items, and obj_draw leaves the rectangle out.  Returns the number of
+ * items, each a (prio | semi << 2) code in codes[]. */
+enum { OBJ_CPU_BLEND_NONE, OBJ_CPU_BLEND_SEMI, OBJ_CPU_BLEND_ALL };
+int obj_cpu_begin(uint8_t lists[4][128], const int counts[4], int blend, uint8_t codes[8]);
+void obj_cpu_draw(int code, int fx);
+void obj_cpu_end(void);
+/* the cells a CPU-composited item may cover (the composed rectangle and the
+ * boxes of the OBJs with that code; GBA coordinates, end exclusive) and the
+ * largest channel values (BGR555) of the colours it may show; 0 if none */
+int obj_cpu_box(int code, int *x0, int *y0, int *x1, int *y1);
+uint32_t obj_cpu_colour_max(int code);
 
 #endif

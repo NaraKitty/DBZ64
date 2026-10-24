@@ -230,6 +230,55 @@ static void wr_pal16(uint32_t i, uint32_t v) { *(uint16_t *)((uint8_t *)gba_mem.
 static uint32_t lcg = 12345;
 static uint32_t rnd(void) { lcg = lcg * 1103515245u + 12345u; return lcg >> 8; }
 
+/* the units the next gba_vram_take_units() reports (stubs.c) */
+extern uint32_t stub_units[96];
+extern int stub_units_any;
+
+static void note_units(uint32_t off, uint32_t len) {
+    for (uint32_t u = off >> 5; u <= (off + len - 1) >> 5; u++)
+        stub_units[u >> 5] |= 1u << (u & 31);
+    stub_units_any = 1;
+}
+
+/* VRAM edits: for every text BG, rewrite the tile under the screen centre
+ * and change a few map entries in view; rewrite the tiles of the first OBJs.
+ * Returns the pages written; with 'units' they are noted as 32-byte units
+ * instead. */
+static uint32_t vram_edits(int units) {
+    uint32_t mask = 0;
+    uint32_t dispcnt = io16(REG_DISPCNT);
+    for (int n = 0; n < 4; n++) {
+        if (!(dispcnt & (0x100u << n)) || (dispcnt & 7) > 1 || ((dispcnt & 7) == 1 && n >= 2)) continue;
+        uint32_t cnt = io16(REG_BG0CNT + 2 * n);
+        uint32_t sb = ((cnt >> 8) & 31) * 0x800u, cb = ((cnt >> 2) & 3) * 0x4000u;
+        int bpp8 = (cnt & 0x80) != 0;
+        uint32_t cx = ((io16(REG_BG0HOFS + 4 * n) + 120) >> 3) & 31, cy = ((io16(REG_BG0HOFS + 4 * n + 2) + 80) >> 3) & 31;
+        uint32_t ea = sb + cy * 64 + cx * 2;
+        uint32_t e = *(const uint16_t *)((const uint8_t *)gba_mem.vram + (ea ^ GBA_HX));
+        uint32_t ta = cb + (e & 0x3FF) * (bpp8 ? 64u : 32u);
+        if (ta + 64 <= 0x10000) {
+            for (int k = 0; k < (bpp8 ? 64 : 32); k++) wr_vram8(ta + k, rnd() & 0xFF);
+            mask |= 1u << (ta >> 12);
+            if (units) note_units(ta, bpp8 ? 64 : 32);
+        }
+        for (int k = 0; k < 6; k++) {
+            uint32_t a2 = sb + ((cy + k) & 31) * 64 + ((cx + 3 * k) & 31) * 2;
+            wr_vram16(a2, (rnd() & 0x1FF) | (rnd() & 0xC00) | (bpp8 ? 0 : (rnd() & 0xF000)));
+            mask |= 1u << (a2 >> 12);
+            if (units) note_units(a2, 2);
+        }
+    }
+    for (int i = 0; i < 4; i++) {
+        uint32_t a2 = *(const uint16_t *)((const uint8_t *)gba_mem.oam + ((i * 8 + 4) ^ GBA_HX)) & 0x3FF;
+        uint32_t off = 0x10000 + a2 * 32;
+        uint32_t len = off + 128 <= 0x18000 ? 128 : 0x18000 - off;
+        for (uint32_t k = 0; k < len; k++) wr_vram8(off + k, rnd() & 0xFF);
+        mask |= 1u << (off >> 12);
+        if (units) note_units(off, len);
+    }
+    return mask;
+}
+
 static void dyn_test(const char *name, const gba_view_t *view) {
     if (!load_state(name)) return;
     uint32_t cpu, rdp, sum = 0, mx = 0;
@@ -253,35 +302,8 @@ static void dyn_test(const char *name, const gba_view_t *view) {
     render_once(view, saved[1], &cpu, &rdp);
     int d_scroll = count_diff(saved[0], saved[1]);
 
-    /* VRAM edits: for every text BG, rewrite the tile under the screen centre and
-     * change a few map entries in view; rewrite the tiles of the first OBJs */
-    uint32_t mask = 0;
-    uint32_t dispcnt = io16(REG_DISPCNT);
-    for (int n = 0; n < 4; n++) {
-        if (!(dispcnt & (0x100u << n)) || (dispcnt & 7) > 1 || ((dispcnt & 7) == 1 && n >= 2)) continue;
-        uint32_t cnt = io16(REG_BG0CNT + 2 * n);
-        uint32_t sb = ((cnt >> 8) & 31) * 0x800u, cb = ((cnt >> 2) & 3) * 0x4000u;
-        int bpp8 = (cnt & 0x80) != 0;
-        uint32_t cx = ((io16(REG_BG0HOFS + 4 * n) + 120) >> 3) & 31, cy = ((io16(REG_BG0HOFS + 4 * n + 2) + 80) >> 3) & 31;
-        uint32_t ea = sb + cy * 64 + cx * 2;
-        uint32_t e = *(const uint16_t *)((const uint8_t *)gba_mem.vram + (ea ^ GBA_HX));
-        uint32_t ta = cb + (e & 0x3FF) * (bpp8 ? 64u : 32u);
-        if (ta + 64 <= 0x10000) {
-            for (int k = 0; k < (bpp8 ? 64 : 32); k++) wr_vram8(ta + k, rnd() & 0xFF);
-            mask |= 1u << (ta >> 12);
-        }
-        for (int k = 0; k < 6; k++) {
-            uint32_t a2 = sb + ((cy + k) & 31) * 64 + ((cx + 3 * k) & 31) * 2;
-            wr_vram16(a2, (rnd() & 0x1FF) | (rnd() & 0xC00) | (bpp8 ? 0 : (rnd() & 0xF000)));
-            mask |= 1u << (a2 >> 12);
-        }
-    }
-    for (int i = 0; i < 4; i++) {
-        uint32_t a2 = *(const uint16_t *)((const uint8_t *)gba_mem.oam + ((i * 8 + 4) ^ GBA_HX)) & 0x3FF;
-        uint32_t off = 0x10000 + a2 * 32;
-        for (int k = 0; k < 128 && off + k < 0x18000; k++) wr_vram8(off + k, rnd() & 0xFF);
-        mask |= 1u << (off >> 12);
-    }
+    /* VRAM edits, reported as dirty pages */
+    uint32_t mask = vram_edits(0);
     stub_dirty_mask = mask;
     render_once(view, saved[0], &cpu, &rdp);
     uint32_t vcpu = cpu;
@@ -290,10 +312,19 @@ static void dyn_test(const char *name, const gba_view_t *view) {
     gba_render_invalidate(); stub_dirty_mask = 0xFFFFFF;
     render_once(view, saved[1], &cpu, &rdp);
     int d_vram = count_diff(saved[0], saved[1]);
-    debugf("DYN %s scroll_diff=%d vram_diff=%d scroll_cpu_avg=%lu scroll_cpu_max=%lu vram_cpu=%lu dirty=%08lx chunks=%lu cells=%lu/%lu\n",
-           name, d_scroll, d_vram, (unsigned long)(sum / 24), (unsigned long)mx, (unsigned long)vcpu,
+    /* more edits, reported as noted 32-byte units only (gba_vram_note) */
+    stub_dirty_mask = 0;
+    render_once(view, NULL, &cpu, &rdp);
+    vram_edits(1);
+    stub_dirty_mask = 0;
+    render_once(view, saved[0], &cpu, &rdp);
+    gba_render_invalidate(); stub_dirty_mask = 0xFFFFFF;
+    render_once(view, saved[1], &cpu, &rdp);
+    int d_units = count_diff(saved[0], saved[1]);
+    debugf("DYN %s scroll_diff=%d vram_diff=%d units_diff=%d scroll_cpu_avg=%lu scroll_cpu_max=%lu vram_cpu=%lu dirty=%08lx chunks=%lu cells=%lu/%lu\n",
+           name, d_scroll, d_vram, d_units, (unsigned long)(sum / 24), (unsigned long)mx, (unsigned long)vcpu,
            (unsigned long)mask, (unsigned long)chunks, (unsigned long)exp, (unsigned long)chk);
-    if (d_scroll || d_vram) {
+    if (d_scroll || d_vram || d_units) {
         char tag[64];
         snprintf(tag, sizeof tag, "%s.dyn_inc", name); fb_dump(tag, saved[0], 320, 240);
         snprintf(tag, sizeof tag, "%s.dyn_cold", name); fb_dump(tag, saved[1], 320, 240);

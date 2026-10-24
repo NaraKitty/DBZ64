@@ -9,7 +9,9 @@
  * All guest memory accesses go through a 4KB page table indexed by
  * (addr >> 12) for the 256MB GBA address space.  Each entry is a host
  * pointer to the start of the page; bit 0 set means "slow path" (I/O,
- * unmapped, ROM page not resident on N64, EEPROM, ...).
+ * unmapped, ROM page not resident on N64, EEPROM, ...).  TLB builds (N64)
+ * map guest memory through the CPU's TLB instead and compute the few
+ * host-pointer lookups the runtime needs (GBA_PAGE_RD below).
  */
 #ifndef GBA_H
 #define GBA_H
@@ -70,11 +72,43 @@ typedef struct gba_mem {
 /* alignment comes from the type (64 bytes, or the TLB page sizes) */
 extern gba_mem_t gba_mem;
 
+#define GBA_PAGE_SLOW 1u
+
+#ifndef GBA_TLB
 /* page tables, 64K entries each (addr bits 27..12) */
 extern uintptr_t gba_rd_page[0x10000];
 extern uintptr_t gba_wr_page[0x10000];
-
-#define GBA_PAGE_SLOW 1u
+#define GBA_PAGE_RD(a) gba_rd_page[((a) >> 12) & 0xFFFFu]
+#define GBA_PAGE_WR(a) gba_wr_page[((a) >> 12) & 0xFFFFu]
+#else
+/* TLB builds keep no page tables (512KB of RDRAM): generated code goes
+ * through the TLB, and the runtime's few host-pointer lookups compute the
+ * page from the region with the same mapping the tables held.  RAM and VRAM
+ * pages are always writable here (VRAM write tracking lives in the TLB);
+ * ROM pages are the ROM cache's resident ones (the platform's
+ * gba_rom_page_host), never writable. */
+const void *gba_rom_page_host(uint32_t a);
+static inline uintptr_t gba_page_lookup(uint32_t a, int write) {
+    switch ((a >> 24) & 0xFu) {
+    case 0x2:
+        return (uintptr_t)gba_mem.ewram + (a & 0x3F000u);
+    case 0x3:
+        return (uintptr_t)gba_mem.iwram + (a & 0x7000u);
+    case 0x6: {
+        uint32_t o = a & 0x1F000u;
+        return (uintptr_t)gba_mem.vram + (o >= 0x18000u ? o - 0x8000u : o);
+    }
+    case 0x8: case 0xA: case 0xC: {
+        const void *p = write ? NULL : gba_rom_page_host(a);
+        return p ? (uintptr_t)p : GBA_PAGE_SLOW;
+    }
+    default:
+        return GBA_PAGE_SLOW;
+    }
+}
+#define GBA_PAGE_RD(a) gba_page_lookup((a), 0)
+#define GBA_PAGE_WR(a) gba_page_lookup((a), 1)
+#endif
 
 uint32_t gba_rd32_slow(uint32_t a);
 uint32_t gba_rd16_slow(uint32_t a);
@@ -92,15 +126,23 @@ extern int gba_vram_track_ok;
 uint32_t gba_vram_take_dirty(void);
 /* mark [a, a+len) dirty and writable (bulk writers like DMA call this first) */
 void gba_mem_touch(uint32_t a, uint32_t len);
+/* Precise notes for the renderer: writers that store to VRAM through host
+ * pointers (natives) and know what they changed report the 32-byte units
+ * of [a, a+len) here instead of dirtying whole pages; the page protection
+ * is left alone.  gba_vram_take_units() hands the renderer the units noted
+ * since its last call (bit u of words[u / 32] = VRAM offset 32 * u; 96
+ * words) and returns 0 when there were none. */
+void gba_vram_note(uint32_t a, uint32_t len);
+int gba_vram_take_units(uint32_t words[96]);
 
 /* host pointer for a guest address in a fast page, or NULL */
 static inline void *gba_host_ptr(uint32_t a) {
-    uintptr_t p = gba_rd_page[(a >> 12) & 0xFFFFu];
+    uintptr_t p = GBA_PAGE_RD(a);
     return (p & GBA_PAGE_SLOW) ? NULL : (void *)(p + (a & 0xFFFu));
 }
 
 static inline void *gba_host_wptr(uint32_t a) {
-    uintptr_t p = gba_wr_page[(a >> 12) & 0xFFFFu];
+    uintptr_t p = GBA_PAGE_WR(a);
     return (p & GBA_PAGE_SLOW) ? NULL : (void *)(p + (a & 0xFFFu));
 }
 

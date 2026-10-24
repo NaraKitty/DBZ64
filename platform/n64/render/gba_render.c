@@ -21,6 +21,15 @@
  *         shadow of OBJ VRAM holding the rows mirrored, drawn in 1-cycle mode
  *         (unflipped sprites with a negative S step: COPY mode cannot flip
  *         horizontally); affine OBJs are rasterised on the CPU.
+ *       - where one OBJ at a time is not the GBA's OBJ layer, the OBJ pixels
+ *         of a rectangle are composited on the CPU with ppu_soft's rules and
+ *         drawn per priority (render_obj.c, obj_cpu_begin): a later OBJ with
+ *         a better priority over an earlier one (its transparent texels
+ *         still pass their priority down), OBJ mosaic, and with alpha
+ *         blending an OBJ that blends over another OBJ (the GBA blends the
+ *         OBJ layer's top pixel with the BG beneath).
+ *       - BG mosaic: text BGs with mosaic are rasterised on the CPU, affine
+ *         and bitmap BGs apply it in their CPU raster.
  *     Texture loads and rectangles go to the RDP as raw command lists
  *     (render_raw.c); modes and TLUTs through rdpq.  COPY mode is used
  *     whenever no blending is needed (the RDP scissor is never used: in COPY
@@ -47,10 +56,14 @@
  *       The 32-bit path is slow on hardware (docs/RDP_COST.md), so it only
  *       covers rectangles of 8x8 cells of the region: cells where a first
  *       target (or semi-transparent OBJ) may have an opaque pixel, from the
- *       layer cache's per-tile flags and OBJ boxes, and with EVB = 0 only the
- *       cells that need tags.  Tags are written only in the cells where,
- *       walking the layers bottom-up, a pixel under a first target may not be
- *       a 2nd target (a tile without transparent pixels covers what is under
+ *       layer cache's per-tile flags (all cells of a BG with mosaic) and OBJ
+ *       boxes (for the CPU-composited OBJ pixels of one priority/semi code,
+ *       the boxes of its OBJs inside the composed rectangle), and with
+ *       EVB = 0 only the cells that need tags.  Every item is clipped to the
+ *       draw window of the pass and rectangle being drawn (the composed
+ *       rectangle's hole in the other OBJs as well).  Tags are written only
+ *       in the cells where, walking the layers bottom-up, a pixel under a
+ *       first target may not be a 2nd target (a tile without transparent pixels covers what is under
  *       it).  Everything else (and every layer above the last first target,
  *       after the final pass) is drawn straight into the display with the
  *       normal COPY / 1-cycle path; the first targets have no pixel there.
@@ -70,11 +83,8 @@
  *           blend with a layer that is both a 1st and a 2nd target, that layer
  *           is drawn raw with its own tag and brightened/darkened at the end
  *           where it is still on top.)
- *         * OBJs are composited one by one, so a semi-transparent / first-target
- *           OBJ over another OBJ blends with that OBJ (the GBA's OBJ layer only
- *           keeps the top OBJ pixel and blends with the BG under it).
- *         * windows, mosaic and the OBJ window are not implemented (the game
- *           never enables them).
+ *         * windows and the OBJ window are not implemented (neither game
+ *           enables them).
  */
 #include <string.h>
 #include <malloc.h>
@@ -410,8 +420,19 @@ static void draw_item(int kind, int id, int fx, int mode, uint32_t dispcnt) {
     case 0: bg_draw_text(id, fx); break;
     case 1: bg_draw_affine(id, fx); break;
     case 2: bg_draw_bitmap(mode, dispcnt, fx); break;
-    default: obj_draw(id, fx); break;
+    case 3: obj_draw(id, fx); break;
+    default: obj_cpu_draw(id, fx); break;
     }
+}
+
+/* draw-list items that are OBJ pixels, and of those the semi-transparent
+ * ones (kind 3: one OBJ, kind 4: the CPU-composited OBJ pixels of one
+ * priority | semi << 2) */
+static inline int item_is_obj(int kind) {
+    return kind >= 3;
+}
+static inline int item_obj_semi(int kind, int id) {
+    return kind == 3 ? obj_info(id)->semi : kind == 4 ? (id >> 2) & 1 : 0;
 }
 
 /* Rectangles of the 32-bit blend path, in cells of the region (end exclusive). */
@@ -647,8 +668,11 @@ static void fin_prepare(const blend_cfg_t *b, int eva, int evb) {
 
 /* ------------------------------------------------------------ frame state */
 
-typedef struct { uint8_t kind, id, fx, l2; } item_t;    /* kind: 0..2 BG kind-1, 3 OBJ */
-static item_t items[4 + 128];           /* draw list in painter's order */
+/* kind: 0..2 BG kind-1, 3 OBJ, 4 the CPU-composited OBJ pixels of one code
+ * (priority | semi << 2, render_obj.c obj_cpu_begin) */
+typedef struct { uint8_t kind, id, fx, l2; } item_t;
+#define MAX_ITEMS (4 + 8 + 128)
+static item_t items[MAX_ITEMS];         /* draw list in painter's order */
 static int nitems, last_alpha, defer;
 static int n32;                         /* items drawn by the 32-bit path: the rest is above every
                                          * first target and goes straight to the display */
@@ -656,8 +680,8 @@ static int n32;                         /* items drawn by the 32-bit path: the r
  * empty if i0 >= i1) and, for BG items, an exact mask (bg_touch[item_bg[k]])
  * (small, so that the masks stay in the 8KB data cache) */
 typedef struct { int16_t i0, j0, i1, j1; } cbox_t;
-static cbox_t item_box[4 + 128];
-static int8_t item_bg[4 + 128];
+static cbox_t item_box[MAX_ITEMS];
+static int8_t item_bg[MAX_ITEMS];
 static cmask_t bg_touch[4], bg_solid[4];
 static cmask_t fr_cov;                  /* cells where the backdrop is hidden under the first targets */
 static int fr_nalpha;                   /* first-target (FX_ALPHA) items */
@@ -692,9 +716,9 @@ static void item_masks(int k, int *nbg) {
     cbox_t *b = &item_box[k];
     *b = (cbox_t){ 0, 0, 0, 0 };
     item_bg[k] = -1;
-    if (it->kind == 3) {
+    if (item_is_obj(it->kind)) {
         int x0, y0, x1, y1;
-        if (obj_box(it->id, &x0, &y0, &x1, &y1)) {
+        if (it->kind == 3 ? obj_box(it->id, &x0, &y0, &x1, &y1) : obj_cpu_box(it->id, &x0, &y0, &x1, &y1)) {
             if (x0 < R.gx0) x0 = R.gx0;
             if (y0 < R.gy0) y0 = R.gy0;
             if (x1 > R.gx1) x1 = R.gx1;
@@ -922,7 +946,7 @@ static void pass32(const rrect_t *rl, int nr, int tg, uint64_t *t_bg, uint64_t *
             }
             /* ... draw it unblended where it does not (a semi-transparent OBJ
              * keeps the OBJ layer's brighten/darken there) ... */
-            int nfx = it->kind == 3 && obj_info(it->id)->semi && fr_obj_bright ? FX_BRIGHT : FX_PLAIN;
+            int nfx = item_obj_semi(it->kind, it->id) && fr_obj_bright ? FX_BRIGHT : FX_PLAIN;
             z_state = ZT_DECAL; z_tag = TAG_NONTARGET;
             draw_rects(k, nfx, rl, nr);
             /* ... and leave its own tag for first targets drawn later (and
@@ -932,7 +956,7 @@ static void pass32(const rrect_t *rl, int nr, int tg, uint64_t *t_bg, uint64_t *
                 draw_rects(k, FX_PLAIN, rl, nr);
             }
         }
-        if (it->kind == 3) *t_obj += get_ticks() - ta; else *t_bg += get_ticks() - ta;
+        if (item_is_obj(it->kind)) *t_obj += get_ticks() - ta; else *t_bg += get_ticks() - ta;
     }
     if (tg && defer) {
         /* deferred brighten/darken where a deferred layer is still on top: the
@@ -990,6 +1014,10 @@ void gba_render_frame(surface_t *disp, const gba_view_t *view) {
     /* ---- dirty tracking ---- */
     uint64_t t0 = get_ticks();
     uint32_t dirty = gba_vram_take_dirty() & 0xFFFFFFu;
+    /* the 32-byte units writers noted precisely (pages they dirtied as a
+     * whole are in 'dirty') */
+    static uint32_t units[96];
+    int have_units = gba_vram_take_units(units);
     if (force_all) {
         dirty = 0xFFFFFFu;
         bg_invalidate();
@@ -998,8 +1026,8 @@ void gba_render_frame(surface_t *disp, const gba_view_t *view) {
     }
     r_stats.dirty_pages = (uint32_t)__builtin_popcount(dirty);
     r_stats.dirty_mask = dirty;
-    bg_track(dirty & 0xFFFFu);
-    obj_track(dirty >> 16);
+    bg_track(dirty & 0xFFFFu, have_units ? units : NULL);
+    obj_track(dirty >> 16, have_units ? units + 64 : NULL);
     r_stats.us_track = us_since(t0);
 
     /* ---- region ---- */
@@ -1093,16 +1121,25 @@ void gba_render_frame(surface_t *disp, const gba_view_t *view) {
     /* ---- OBJ list ---- */
     uint8_t olist[4][128];
     int ocount[4] = { 0, 0, 0, 0 };
+    uint8_t ocodes[8];
+    int ncodes = 0;
     if (dispcnt & 0x1000) {
         uint64_t tp = get_ticks();
         obj_parse(dispcnt, olist, ocount);
+        /* OBJs drawn as alpha items blend with (or, by the 2nd-target
+         * rule, check) what is under them: under the GBA's OBJ layer that is
+         * a BG, never another OBJ */
+        ncodes = obj_cpu_begin(olist, ocount,
+                               lfx[4] == FX_ALPHA ? OBJ_CPU_BLEND_ALL :
+                               semi_fx == FX_ALPHA ? OBJ_CPU_BLEND_SEMI : OBJ_CPU_BLEND_NONE, ocodes);
         uint64_t tc = get_ticks();
         r_stats.us_obj_parse = (uint32_t)TICKS_TO_US(tc - tp);
         obj_prepare(olist, ocount);             /* OBJ shadow: part of us_track */
         r_stats.us_track += (uint32_t)TICKS_TO_US(get_ticks() - tc);
     }
 
-    /* ---- draw list in painter's order: priority 3..0, BGs (3..0) then OBJs (127..0) ---- */
+    /* ---- draw list in painter's order: priority 3..0, BGs (3..0), then the
+     * CPU-composited OBJ pixels of that priority, then OBJs (127..0) ---- */
     nitems = 0;
     int bgprio[4];
     for (int n = 0; n < 4; n++)
@@ -1112,6 +1149,11 @@ void gba_render_frame(surface_t *disp, const gba_view_t *view) {
             if (!bg_kind[mode][n] || !(dispcnt & (0x100u << n)) || bgprio[n] != p) continue;
             items[nitems++] = (item_t){ (uint8_t)(bg_kind[mode][n] - 1), (uint8_t)n, (uint8_t)lfx[n],
                                         (uint8_t)((l2 >> n) & 1) };
+        }
+        for (int k = 0; k < ncodes; k++) {
+            if ((ocodes[k] & 3) != p) continue;
+            items[nitems++] = (item_t){ 4, ocodes[k], (uint8_t)((ocodes[k] & 4) ? semi_fx : lfx[4]),
+                                        (uint8_t)((l2 >> 4) & 1) };
         }
         for (int k = 0; k < ocount[p]; k++) {
             int i = olist[p][k];
@@ -1270,7 +1312,8 @@ void gba_render_frame(surface_t *disp, const gba_view_t *view) {
         for (int k = 0; k < nitems; k++) {
             if (items[k].fx != FX_ALPHA) continue;
             uint32_t c = items[k].kind == 0 ? bg_text_colour_max(items[k].id) :
-                         items[k].kind == 3 ? obj_colour_max(items[k].id) : 0x7FFFu;
+                         items[k].kind == 3 ? obj_colour_max(items[k].id) :
+                         items[k].kind == 4 ? obj_cpu_colour_max(items[k].id) : 0x7FFFu;
             for (int ch = 0; ch < 3; ch++, c >>= 5)
                 if ((c & 31) > am[ch]) am[ch] = c & 31;
         }
@@ -1325,7 +1368,7 @@ void gba_render_frame(surface_t *disp, const gba_view_t *view) {
             }
             uint64_t ta = get_ticks();
             draw_item(it->kind, it->id, it->fx, mode, dispcnt);
-            if (it->kind == 3) t_obj += get_ticks() - ta; else t_bg += get_ticks() - ta;
+            if (item_is_obj(it->kind)) t_obj += get_ticks() - ta; else t_bg += get_ticks() - ta;
         }
         j = j1;
     }
@@ -1378,13 +1421,14 @@ void gba_render_frame(surface_t *disp, const gba_view_t *view) {
         for (int k = n32; k < nitems; k++) {
             uint64_t ta = get_ticks();
             draw_item(items[k].kind, items[k].id, items[k].fx, mode, dispcnt);
-            if (items[k].kind == 3) t_obj += get_ticks() - ta; else t_bg += get_ticks() - ta;
+            if (item_is_obj(items[k].kind)) t_obj += get_ticks() - ta; else t_bg += get_ticks() - ta;
         }
     }
     r_stats.us_bg = (uint32_t)TICKS_TO_US(t_bg) - r_stats.us_raster;
     r_stats.us_obj = (uint32_t)TICKS_TO_US(t_obj);
 
 done:
+    obj_cpu_end();
     raw_flush();
     rdpq_set_scissor(0, 0, W, H);
     rdpq_fence();

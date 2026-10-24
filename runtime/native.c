@@ -98,39 +98,65 @@ static const uint32_t *src_span(uint32_t a, uint32_t len) {
     return p;
 }
 
-/* 0x03000480 (ARM, IWRAM): gather 8x8 8bpp tiles out of a bitmap.
- * r0 = bitmap {+0x24 base, +0x2C stride}, r1 = output (64 bytes per tile,
- * advanced), r2 -> rect {x0, y0, x1, y1} in pixels (multiples of 8).  Each
- * tile is copied as 4 groups of two 8-byte rows (ldm, ldm, stm).
+/* LoG2 0x03000480 / Buu's Fury 0x030004C0 (ARM, IWRAM): gather 8x8 8bpp
+ * tiles out of a bitmap.  r0 = bitmap {+0x24 base, stride at +0x2C (LoG2) or
+ * +0x28 (Buu's Fury)}, r1 = output (64 bytes per tile, advanced), r2 -> rect
+ * {x0, y0, x1, y1} in pixels (multiples of 8).  Each tile is copied as 4
+ * groups of two 8-byte rows (ldm, ldm, stm); the two games' routines differ
+ * only in the stride field.
  * Outputs (the routine's summary): r0-r3, r12 and the flags (Z and C set:
  * the last 'subs' reaches 0). */
-void native_tile_gather(void) {
+static inline __attribute__((always_inline)) void tile_gather(uint32_t stride_field) {
     /* stm ignores the low address bits but its writeback keeps them */
     uint32_t bm = cpu.r[0], r1 = cpu.r[1], out = r1 & ~3u, rect = cpu.r[2], sp = cpu.r[13];
     uint32_t x0 = rd32(rect), y0 = rd32(rect + 4), x1 = rd32(rect + 8), y1 = rd32(rect + 12);
-    uint32_t stride = rd32(bm + 0x2C);
+    uint32_t stride = rd32(bm + stride_field);
     uint32_t base = rd32(bm + 0x24) + stride * y0 + x0;
     uint32_t rows = y1 - y0, width = x1 - x0;
     /* the pushed r4-r11 (not inputs: the recompiled routine pushes 0) */
     for (int i = 0; i < 8; i++)
         wr32(sp - 32 + 4 * (uint32_t)i, 0);
     uint32_t r0 = 0, r2 = 0, r12 = 0;
-    /* both sides in plain RAM: no per-access address translation */
+    /* both sides in plain RAM, or RAM/ROM to VRAM: no per-access address
+     * translation */
     uint32_t ntiles = (rows / 8) * (width / 8);
     const uint32_t *hs = NULL;
     uint32_t *hd = NULL;
+    int vram = 0;
     if (!(rows & 7) && !(width & 7) && rows && width && !(stride & 3) && !(base & 3) &&
         stride < 0x10000u && rows <= 0x1000u) {
         hs = src_span(base, stride * (rows - 1) + width);
         hd = ram_span(out, ntiles * 64);
+        if (!hd && (out >> 24) == 0x06 && (out & 0x1FFFFu) + ntiles * 64 <= 0x18000u) {
+            hd = gba_mem.vram + (out & 0x1FFFFu) / 4;
+            vram = 1;
+        }
     }
     if (hs && hd) {
-        uint32_t sw = stride / 4;
+        uint32_t sw = stride / 4, ta = out;
         for (uint32_t band = 0; band < rows; band += 8) {
             r2 = base + band * stride;
             const uint32_t *col = hs + band * sw;
-            for (uint32_t w = 0; w < width; w += 8, col += 2) {
+            for (uint32_t w = 0; w < width; w += 8, col += 2, ta += 64) {
                 const uint32_t *s = col;
+                if (vram) {
+                    /* VRAM tiles that are already there are not written
+                     * (no dirty cache lines); the renderer is told which
+                     * tiles changed (gba_vram_note) */
+                    uint32_t diff = 0;
+                    for (int g = 0; g < 4; g++, s += 2 * sw)
+                        diff |= (s[0] ^ hd[4 * g]) | (s[1] ^ hd[4 * g + 1]) |
+                                (s[sw] ^ hd[4 * g + 2]) | (s[sw + 1] ^ hd[4 * g + 3]);
+                    s = col;
+                    if (!diff) {
+                        hd += 16;
+                        r12 = s[7 * sw + 1];
+                        r0 = r2 + 8 * stride;
+                        r2 += 8;
+                        continue;
+                    }
+                    gba_vram_note(ta, 64);
+                }
                 for (int g = 0; g < 4; g++, s += 2 * sw) {
                     uint32_t a = s[0], b = s[1], c = s[sw], d = s[sw + 1];
                     hd[0] = a; hd[1] = b; hd[2] = c; hd[3] = d;
@@ -176,6 +202,14 @@ void native_tile_gather(void) {
     cpu.z = 1;
     cpu.c = 1;
     cpu.v = 0;
+}
+
+void native_tile_gather(void) {
+    tile_gather(0x2C);
+}
+
+void native_tile_gather_s28(void) {
+    tile_gather(0x28);
 }
 
 /* n halfwords from src to dst, like a 16-bit incrementing DMA */

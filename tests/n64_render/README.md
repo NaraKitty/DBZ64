@@ -139,3 +139,15 @@ contain the game's video memory and stay out of the repository.
 | `synth_rain`, `synth_rain_hole` | a solid first target with few colours (16/12) over the whole screen, OBJs below and above it (TLUT final pass in two passes, items above drawn after it); with holes in BG3 (every 7th map entry) the backdrop, not a 2nd target, needs tags in scattered cells: every row gets tagged (worst case) |
 | `synth_sunbeam` | a partial first target with colours below 28 (9/16: the 2x final pass suffices) over a room, backdrop around it |
 | `synth_dialog`, `synth_dialog_corner` | BLDCNT set for an empty BG0 (no 32-bit path) / with a few tiles in one corner (a small one) |
+| `synth_mosaic_bg` | text BG mosaic (4bpp banks, 8bpp, 512-wide maps, 16-bit scrolls) with mosaic OBJs |
+| `synth_mosaic_obj` | OBJ mosaic: regular (flips, 4bpp/8bpp) and affine OBJs, partly off-screen |
+| `synth_mosaic_mode7` | mode 1 BG2 with per-line parameters and BG1 per-line scroll, both with mosaic |
+| `synth_mosaic_mode4`, `synth_mosaic_mode3` | bitmap modes with BG2 mosaic (scaled mode 4, mode 3 with darken) |
+| `synth_objprio` | the OBJ layer's transparent-texel priority rule: worse-priority OBJs under later better-priority ones, semi-transparent and affine ones, with alpha blending |
+
+The renderer composites the OBJ pixels of a rectangle on the CPU where
+drawing one OBJ at a time would not give the GBA's OBJ layer (see
+`obj_cpu_begin` in `render_obj.c`); the `synth_obj*`, `synth_semi*`,
+`synth_mosaic*` and `synth_objprio` states exercise it.  `synth_sat14_6`
+is the one known difference: the 14/6 alpha blend has no exact RDP
+configuration (off by one in some channels).

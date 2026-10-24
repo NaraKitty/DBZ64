@@ -13,8 +13,9 @@
  *     gba_render_frame(fb, &view);        // only enqueues rdpq commands
  *     rdpq_detach_show();                 // caller presents
  *
- *  - gba_render_frame() calls gba_vram_take_dirty() exactly once per call:
- *    nothing else may consume the VRAM dirty bits.
+ *  - gba_render_frame() calls gba_vram_take_dirty() and
+ *    gba_vram_take_units() exactly once per call: nothing else may consume
+ *    the VRAM dirty bits or the noted units.
  *  - On entry it waits until the RDP has finished the previous
  *    gba_render_frame() (its caches are single-buffered), so the CPU never
  *    rewrites a texture the RDP may still be reading.  Normally the RDP is
@@ -35,8 +36,9 @@
  * CI8 rings + slot tables; rings 2 and 3 are one block that holds the
  * affine BG texture in modes 1/2), BG VRAM shadow 72KB, OBJ shadow + scratch 64KB, raw RDP
  * command buffer 128KB, scratch 160KB, blend intermediate 300KB + tag buffer
- * 150KB (320x240), blend-path cell masks 34KB; affine/bitmap BG raster
- * buffers (75KB each) on first use.
+ * 150KB (320x240), blend-path cell masks 34KB, CPU-composited OBJ pixels
+ * 32KB (static); affine/bitmap BG raster buffers (75KB each, 150KB for
+ * direct colour) on first use.
  */
 #ifndef GBA_RENDER_H
 #define GBA_RENDER_H
