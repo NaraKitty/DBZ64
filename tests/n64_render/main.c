@@ -135,7 +135,8 @@ static void print_stats(const char *name, int pass, uint32_t cpu_us, uint32_t rd
     const gba_render_stats_t *s = gba_render_get_stats();
     debugf("TIME %s pass=%d cpu=%lu rdp_done=%lu wait=%lu track=%lu bg=%lu bgupd=%lu obj=%lu oparse=%lu raster=%lu "
            "dirty=%lu chunks=%lu cells=%lu/%lu objs=%lu tiles=%lu aff=%lu rects=%lu "
-           "pxcopy=%lu px1=%lu px2=%lu pxfill=%lu blend=%lu tags=%lu wrongpairs=%lu loads=%lu loadbytes=%lu\n",
+           "pxcopy=%lu px1=%lu px2=%lu pxfill=%lu blend=%lu tags=%lu wrongpairs=%lu loads=%lu loadbytes=%lu "
+           "blendpx=%lu tagpx=%lu blendrects=%lu\n",
            name, pass, (unsigned long)cpu_us, (unsigned long)rdp_us, (unsigned long)s->us_wait,
            (unsigned long)s->us_track, (unsigned long)s->us_bg, (unsigned long)s->us_bg_update, (unsigned long)s->us_obj, (unsigned long)s->us_obj_parse,
            (unsigned long)s->us_raster, (unsigned long)s->dirty_pages, (unsigned long)s->chunks_changed,
@@ -143,7 +144,8 @@ static void print_stats(const char *name, int pass, uint32_t cpu_us, uint32_t rd
            (unsigned long)s->obj_drawn, (unsigned long)s->obj_tiles, (unsigned long)s->obj_affine,
            (unsigned long)s->rects, (unsigned long)s->px_copy, (unsigned long)s->px_1cyc,
            (unsigned long)s->px_2cyc, (unsigned long)s->px_fill, (unsigned long)s->blend_path,
-           (unsigned long)s->tags, (unsigned long)s->blend_wrong, (unsigned long)s->loads, (unsigned long)s->load_bytes);
+           (unsigned long)s->tags, (unsigned long)s->blend_wrong, (unsigned long)s->loads, (unsigned long)s->load_bytes,
+           (unsigned long)s->blend_px, (unsigned long)s->tag_px, (unsigned long)s->blend_rects);
 }
 
 /* render one frame into a fresh display buffer; returns it (already shown) */
@@ -357,6 +359,39 @@ static void wide_test(const char *name, const gba_view_t *native) {
     fb_dump(tag, saved[2], 320, 240);
 }
 
+#ifdef CMDLOG
+/* RDP command stream of one steady-state frame per state, for the RDP cost
+ * model (tests/n64_render/rdpcost.py): the 320x240 view with the WIDE hooks
+ * (like the in-game field view) and the native view.  Needs RDPQ_VALIDATE
+ * (rdpq's trace engine prints every command the RDP receives).  The logged
+ * frames are dumped too, so they can be checked against ppu_soft. */
+static void cmdlog_state(const char *name, const gba_view_t *native) {
+    uint32_t cpu, rdp;
+    char tag[64];
+    for (int v = 0; v < 2; v++) {
+        if (!load_state(name)) return;
+        gba_view_t wv = *native;
+        if (v == 0) {
+            wv.x0 = -40; wv.y0 = -40; wv.x1 = 280; wv.y1 = 200;
+            wv.bg_entry = hook_entry;
+            wv.obj_pos = hook_obj;
+        }
+        gba_render_invalidate(); stub_dirty_mask = 0xFFFFFF;
+        render_once(&wv, NULL, &cpu, &rdp);
+        stub_dirty_mask = 0;
+        debugf("CMDLOG_BEGIN %s %s\n", name, v == 0 ? "wide" : "native");
+        rdpq_debug_log(true);
+        render_once(&wv, saved[1], &cpu, &rdp);
+        rdpq_debug_log(false);
+        rspq_wait();
+        debugf("CMDLOG_END %s\n", name);
+        print_stats(name, v == 0 ? 10 : 11, cpu, rdp);
+        snprintf(tag, sizeof tag, v == 0 ? "%s.dyn_wide" : "%s", name);
+        fb_dump(tag, saved[1], 320, 240);
+    }
+}
+#endif
+
 #if defined(BENCH) || defined(PROFILE)
 /* CPU time per frame over 32 frames for gameplay-like dirty patterns
  * (the runtime tracks VRAM writes in 16KB groups on the N64):
@@ -375,7 +410,7 @@ static void bench_state(const char *name, const gba_view_t *view) {
     for (int sc = 0; sc < 5; sc++) {
         if (BENCH_SCEN >= 0 && sc != BENCH_SCEN) continue;
         if (!load_state(name)) return;
-        uint32_t cpu, rdp, sum = 0, mx = 0;
+        uint32_t cpu, rdp, sum = 0, mx = 0, rmax = 0;
         gba_render_invalidate(); stub_dirty_mask = 0xFFFFFF;
         render_once(view, NULL, &cpu, &rdp);
 #ifdef PROFILE
@@ -392,11 +427,13 @@ static void bench_state(const char *name, const gba_view_t *view) {
             stub_dirty_mask = smask[sc];
             render_once(view, NULL, &cpu, &rdp);
             sum += cpu; if (cpu > mx) mx = cpu;
+            if (gba_render_get_stats()->blend_rects > rmax) rmax = gba_render_get_stats()->blend_rects;
         }
 #ifdef PROFILE
         prof_enable = 0;
 #endif
-        debugf("BENCH %s %s avg=%lu max=%lu\n", name, sn[sc], (unsigned long)(sum / 32), (unsigned long)mx);
+        debugf("BENCH %s %s avg=%lu max=%lu blendrects_max=%lu\n", name, sn[sc], (unsigned long)(sum / 32),
+               (unsigned long)mx, (unsigned long)rmax);
     }
 }
 #endif
@@ -611,6 +648,11 @@ int main(void) {
     rdpq_debug_start();
 #endif
     dfs_init(DFS_DEFAULT_LOCATION);
+#ifdef RDPBENCH
+    /* RDP throughput benchmarks for real hardware (rdpbench.c); never returns */
+    void rdpbench_run(void);
+    rdpbench_run();
+#endif
     gba_render_init();
 #ifdef MICROBENCH
     microbench();
@@ -643,6 +685,12 @@ int main(void) {
 #ifdef PROFILE
     prof_dump();
 #endif
+    nocalib = 1;
+#elif defined(CMDLOG)
+    for (char *tok = strtok_r(list, " \r\n", &save); tok; tok = strtok_r(NULL, " \r\n", &save)) {
+        if (tok[0] == '#') continue;
+        cmdlog_state(tok, &view);
+    }
     nocalib = 1;
 #else
     for (char *tok = strtok_r(list, " \r\n", &save); tok; tok = strtok_r(NULL, " \r\n", &save)) {

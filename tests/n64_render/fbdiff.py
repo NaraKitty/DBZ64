@@ -64,7 +64,9 @@ def parse_log(path):
 def rdp_estimate_us(t):
     """Rough RDP time from the pixel/load counters (ares does not model RDP
     timing): FILL and COPY 4 px/clk, 1-cycle 1 px/clk, 2-cycle 0.5 px/clk,
-    TMEM loads 8 bytes/clk, ~24 clk setup per rectangle and per load; 62.5 MHz."""
+    TMEM loads 8 bytes/clk, ~24 clk setup per rectangle and per load; 62.5 MHz.
+    Ideal-pipeline numbers only: rdpcost.py replays the logged command stream
+    with the model calibrated on hardware (docs/RDP_COST.md)."""
     g = lambda k: int(t.get(k, 0))
     clk = (g('pxfill') + g('pxcopy')) / 4 + g('px1') + 2 * g('px2') + g('loadbytes') / 8         + 24 * (g('rects') + g('loads'))
     return clk / 62.5
@@ -166,8 +168,11 @@ def main():
         cpu = [t.get(p, {}).get('cpu', '?') for p in range(3)]
         rdp = f"{rdp_estimate_us(t[1]):.0f}" if 1 in t else '?'
         bl = t.get(1, {}).get('blend')
-        if bl in ('1', '2'):
-            notes.append('blend32' if bl == '1' else 'blend32+tlutfinal')
+        if bl in ('1', '2', '3'):
+            notes.append({'1': 'blend32', '2': 'blend32+tlutfinal', '3': 'blend32+tlutfinal2'}[bl])
+        bpx = t.get(1, {}).get('blendpx')
+        if bpx and bpx != '0':
+            notes.append(f"blendpx={bpx}")
         if t.get(1, {}).get('tags') == '1':
             notes.append('tags')
         print(f"{tag:22s} {nbad:7d} {maxd:4d} {nborder:6d} {pp:>9s} {cpu[0]:>6s} {cpu[1]:>6s} {cpu[2]:>6s} {rdp:>6s} {' '.join(notes)}")

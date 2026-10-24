@@ -39,11 +39,12 @@
 static uint8_t *ring[4];                /* uncached */
 static surface_t ring_surf[4];
 /* frame: r_frame of the expansion (0 = empty) | SLOT_FULL when the expanded
- * tile has a non-zero (opaque) pixel (r_frame stays below 2^31 for a year
- * of 60 fps) */
+ * tile has a non-zero (opaque) pixel | SLOT_SOLID when all its pixels are
+ * (r_frame stays below 2^30 for 200 days of 60 fps) */
 typedef struct { uint32_t key, frame; } slot_t;
 #define SLOT_FULL  0x80000000u
-#define SLOT_FRAME 0x7FFFFFFFu
+#define SLOT_SOLID 0x40000000u
+#define SLOT_FRAME 0x3FFFFFFFu
 static slot_t slot[4][RING_CX * RING_CY];
 static uint8_t touched[4][RING_CX * RING_CY / 8];   /* slots drawn from in this frame */
 static uint8_t touched_any[4];          /* layer has bits set in touched (cleared lazily) */
@@ -54,6 +55,20 @@ static uint16_t tile_use[4][1024];      /* number of ring slots holding each til
  * nothing to show. */
 static uint8_t chunk_full[4][(RING_CX / 8) * (RING_CY / 4)];
 static uint64_t chunk_opaque[4];        /* bit k: chunk_full[n][k] != 0 */
+/* the SLOT_FULL / SLOT_SOLID flags again, one word per ring row (bit = slot
+ * column), for the blend path's cell masks */
+static uint64_t row_full[4][RING_CY], row_solid[4][RING_CY];
+/* lowest << 8 | highest non-zero palette index of each slot's tile (BG
+ * palette), 0 = not known yet (found when needed, see bg_text_colour_max) */
+static uint16_t slot_rng[4][RING_CX * RING_CY];
+/* Results of bg_text_cells / bg_text_colour_max kept for the next frames:
+ * valid while the view (single scroll band) and the layer's slot flags
+ * (mask_gen) or slot contents (rng_gen) stay the same */
+typedef struct { int ok, h, v, x0, y0, x1, y1; uint32_t gen; } vkey_t;
+static uint32_t mask_gen[4], rng_gen[4];
+static vkey_t mkey[4], rkey[4];
+static cmask_t mc_touch[4], mc_solid[4];
+static uint32_t rc_rng[4];
 
 /* per-layer change tracking */
 typedef struct {
@@ -61,6 +76,10 @@ typedef struct {
     int valid;                  /* window below describes the ring contents */
     int cx0, cy0, cx1, cy1;     /* last frame's visible cell window (inclusive) */
     uint32_t frame;             /* r_frame of the last update */
+    /* arguments of the last update: the same update again in the same frame
+     * (a layer drawn in several passes) has nothing to do */
+    int ux0, ux1, uy0, uy1, uinc, ukey_hook;
+    uint32_t ucnt;
 } lstate_t;
 static lstate_t ls[4];
 
@@ -147,6 +166,10 @@ static void layer_reset(int n) {
     memset(tile_use[n], 0, sizeof tile_use[n]);
     memset(chunk_full[n], 0, sizeof chunk_full[n]);
     chunk_opaque[n] = 0;
+    memset(row_full[n], 0, sizeof row_full[n]);
+    memset(row_solid[n], 0, sizeof row_solid[n]);
+    mask_gen[n]++;
+    rng_gen[n]++;
     ls[n].valid = 0;
 }
 
@@ -176,7 +199,7 @@ void bg_track(uint32_t pages) {
             touched_any[n] = 0;
         }
     while (pages) {
-        int p = __builtin_ctz(pages);
+        int p = r_ctz64(pages);
         pages &= pages - 1;
         const uint64_t *v = (const uint64_t *)(gba_mem.vram + p * 1024);
         uint64_t *s = (uint64_t *)(bg_shadow + p * 1024);
@@ -204,8 +227,30 @@ void bg_track(uint32_t pages) {
 
 /* ------------------------------------------------------------ text BG */
 
-/* expand a cell into its ring slot; returns 1 if it has a non-zero pixel */
-static int expand_cell(int n, int si, uint32_t entry, uint32_t cb, int bpp8) {
+/* lowest << 8 | highest non-zero palette index among 'n' values of 'bits' bits
+ * packed in the words w[] (+ 'base'); 0xFF00 if none */
+static uint32_t index_range(const void *w, int nbytes, int bits, uint32_t base) {
+    const uint8_t *b = (const uint8_t *)w;
+    uint32_t lo = 0xFF, hi = 0;
+    for (int i = 0; i < nbytes; i++) {
+        uint32_t v = b[i];
+        if (bits == 8) {
+            if (v) { if (v < lo) lo = v; if (v > hi) hi = v; }
+        } else {
+            for (int k = 0; k < 2; k++, v >>= 4)
+                if (v & 15) {
+                    uint32_t x = base + (v & 15);
+                    if (x < lo) lo = x;
+                    if (x > hi) hi = x;
+                }
+        }
+    }
+    return (lo << 8) | hi;
+}
+
+/* expand a cell into its ring slot; returns SLOT_FULL if it has a non-zero
+ * pixel, | SLOT_SOLID if all of its pixels are */
+static uint32_t expand_cell(int n, int si, uint32_t entry, uint32_t cb, int bpp8) {
     uint64_t *dst = (uint64_t *)(ring[n] + (si >> 6) * 8 * RING_W + (si & 63) * 8);
     uint64_t any = 0;
     const int stride = RING_W / 8;
@@ -219,12 +264,15 @@ static int expand_cell(int n, int si, uint32_t entry, uint32_t cb, int bpp8) {
         }
         /* a row is one native doubleword [w0][w1] holding pixels 3..0, 7..4 */
         const uint64_t *src = (const uint64_t *)(gba_mem.vram + (addr >> 2));
+        const uint64_t ones = 0x0101010101010101ull, highs = 0x8080808080808080ull;
+        uint64_t zero = 0;          /* high bit set in a byte lane: some row has a zero pixel there */
         if (vf) src += 7;
         int step = vf ? -1 : 1;
         if (hf) {   /* right-to-left = the two words swapped */
             for (int r = 0; r < 8; r++, src += step) {
                 uint64_t x = *src;
                 any |= x;
+                zero |= (x - ones) & ~x & highs;
                 dst[r * stride] = (x << 32) | (x >> 32);
             }
         } else {    /* byte-reverse each word */
@@ -232,10 +280,12 @@ static int expand_cell(int n, int si, uint32_t entry, uint32_t cb, int bpp8) {
             for (int r = 0; r < 8; r++, src += step) {
                 uint64_t x = *src;
                 any |= x;
+                zero |= (x - ones) & ~x & highs;
                 x = ((x & m8) << 8) | ((x >> 8) & m8);
                 dst[r * stride] = ((x & m16) << 16) | ((x >> 16) & m16);
             }
         }
+        return (any ? SLOT_FULL : 0) | (zero ? 0 : SLOT_SOLID);
     } else {
         uint32_t addr = cb + tile * 32;
         if (addr >= 0x10000u) {
@@ -244,6 +294,7 @@ static int expand_cell(int n, int si, uint32_t entry, uint32_t cb, int bpp8) {
         }
         const uint32_t *src = gba_mem.vram + (addr >> 2);
         uint64_t bank = 0x0101010101010101ull * (uint64_t)((entry >> 12) << 4);
+        uint64_t allm = ~0ull;      /* pixels non-zero in every row */
         for (int r = 0; r < 8; r++) {
             int sr = vf ? 7 - r : r;
             uint32_t w = src[sr];       /* guest LE word: byte k = pixels 2k (low nib), 2k+1 */
@@ -261,9 +312,10 @@ static int expand_cell(int n, int si, uint32_t entry, uint32_t cb, int bpp8) {
                 #undef SW
             }
             dst[r * stride] = v | (bank & m);
+            allm &= m;
         }
+        return (any ? SLOT_FULL : 0) | (~allm ? 0 : SLOT_SOLID);
     }
-    return any != 0;
 }
 
 /* layer parameters for the current frame */
@@ -301,7 +353,8 @@ static void refill(int si, uint32_t key) {
         tile_use[L.n][t_new]++;
         tile_ref(L.cb, L.bpp8, t_new);
     }
-    uint32_t full = expand_cell(L.n, si, key >> 16, L.cb, L.bpp8) ? SLOT_FULL : 0;
+    uint32_t flags = expand_cell(L.n, si, key >> 16, L.cb, L.bpp8);
+    uint32_t full = flags & SLOT_FULL;
     if (full != (sl->frame & SLOT_FULL)) {
         /* opaque slots per chunk (and the chunk's bit) follow the change */
         int ci = ((si >> 8) << 3) | ((si & 63) >> 3);
@@ -310,8 +363,16 @@ static void refill(int si, uint32_t key) {
         if (*cf) chunk_opaque[L.n] |= 1ull << ci;
         else chunk_opaque[L.n] &= ~(1ull << ci);
     }
+    if ((flags ^ sl->frame) & (SLOT_FULL | SLOT_SOLID))
+        mask_gen[L.n]++;
+    rng_gen[L.n]++;
     sl->key = key;
-    sl->frame = r_frame | full;
+    sl->frame = r_frame | flags;
+    slot_rng[L.n][si] = 0;
+    uint64_t cbit = 1ull << (si & (RING_CX - 1));
+    int row = si >> 6;
+    row_full[L.n][row] = (flags & SLOT_FULL) ? row_full[L.n][row] | cbit : row_full[L.n][row] & ~cbit;
+    row_solid[L.n][row] = (flags & SLOT_SOLID) ? row_solid[L.n][row] | cbit : row_solid[L.n][row] & ~cbit;
     r_stats.cells_expanded++;
 }
 
@@ -414,6 +475,11 @@ static void update_layer(int n, uint32_t cnt, int X0, int X1, int Y0, int Y1, in
     L.hook = r_view->bg_entry;
     uint32_t key = (cnt & 0xDF8C) | (L.hook ? 0x10000u : 0);
     lstate_t *st = &ls[n];
+    if (st->frame == r_frame && key == st->key && st->ucnt == cnt && st->ux0 == X0 && st->ux1 == X1 &&
+        st->uy0 == Y0 && st->uy1 == Y1 && st->uinc == incremental)
+        return;
+    st->ucnt = cnt; st->ux0 = X0; st->ux1 = X1; st->uy0 = Y0; st->uy1 = Y1; st->uinc = incremental;
+    st->ukey_hook = L.hook != NULL;
     if (key != st->key) {
         layer_release(n);
         layer_reset(n);
@@ -455,7 +521,7 @@ static void update_layer(int n, uint32_t cnt, int X0, int X1, int Y0, int Y1, in
 }
 
 static void draw_ring(int n, int h, int v, int gy0, int gy1) {
-    r_scissor(R.gx0, gy0, R.gx1, gy1);
+    r_scissor(R.wx0, gy0, R.wx1, gy1);
     /* tile 1 loads a chunk, tile 0 draws it with chunk-relative texel coordinates */
     raw_reserve(7);
     raw_put(RAW_SYNC_PIPE);
@@ -466,19 +532,75 @@ static void draw_ring(int n, int h, int v, int gy0, int gy1) {
     raw_put(raw_set_tile_size(0, 0, 0, CHUNK_W, CHUNK_H));
     raw_owner = RAW_OWNER_NONE;
     /* r_rect specialised for the chunks: the band [gy0, gy1) lies inside the
-     * region and only its rows are loaded, so the rectangles are clipped at
-     * the left and right edges only; s starts at the clipped columns, t = 0 */
+     * draw window and only its rows are loaded, so the rectangles are clipped
+     * at the left and right edges only; s starts at the clipped columns, t = 0 */
     const int copy = r_clip.copy, ty = r_clip.ty;
     const int cx0 = r_clip.x0, cx1 = r_clip.x1;
     const uint64_t w1 = ((uint64_t)(copy ? 0x1000 : 0x400) << 16) | 0x400;
-    int rx = (h + R.gx0) & (RING_W - 1), ry = (v + gy0) & (RING_H - 1);
-    int xs = R.gx0 + r_clip.tx - (rx & (CHUNK_W - 1)), lx0 = rx & ~(CHUNK_W - 1);
+    int rx = (h + R.wx0) & (RING_W - 1), ry = (v + gy0) & (RING_H - 1);
+    int xs = R.wx0 + r_clip.tx - (rx & (CHUNK_W - 1)), lx0 = rx & ~(CHUNK_W - 1);
     int gy = gy0 - (ry & (CHUNK_H - 1)), ly = ry & ~(CHUNK_H - 1);
     const uint64_t om = chunk_opaque[n];
     /* commands go straight into the raw buffer through a local pointer; the
      * inner loop touches no other memory (its state stays in registers) */
-    uint64_t *p = raw_ptr, *pend = raw_end - (5 + 4);
-    uint32_t px = 0, rects = 0, lbytes = 0;
+    uint64_t *p = raw_ptr, *pend = raw_end - (copy ? 5 + 4 : 3 + 2 * 16 + 4);
+    uint32_t px = 0, rects = 0, lbytes = 0, loads = 0;
+    if (!copy) {
+        /* 1-cycle (the 32-bit blend path, where every pixel counts): a
+         * rectangle per run of slots with an opaque pixel in each row of
+         * slots (rows with the same runs stacked), one load per chunk */
+        for (; gy < gy1; gy += CHUNK_H, ly = (ly + CHUNK_H) & (RING_H - 1)) {
+            int t0 = gy < gy0 ? gy0 - gy : 0;
+            int t1 = gy + CHUNK_H > gy1 ? gy1 - gy : CHUNK_H;
+            int y = gy + t0 + ty;
+            uint64_t ldw = raw_load_tile(1, 0, ly + t0, CHUNK_W, ly + t1);
+            uint32_t opaque = (uint32_t)(om >> ((ly >> 5) << 3)) & 0xFF;
+            int lx = lx0;
+            for (int x = xs; x < cx1; x += CHUNK_W, lx = (lx + CHUNK_W) & (RING_W - 1)) {
+                int xa = x > cx0 ? x : cx0, xb = x + CHUNK_W < cx1 ? x + CHUNK_W : cx1;
+                if (xa >= xb || !((opaque >> (lx >> 6)) & 1))
+                    continue;
+                if (__builtin_expect(p > pend, 0)) {
+                    raw_ptr = p;
+                    raw_overflow();
+                    p = raw_ptr;
+                }
+                RAW_HWCHECK("LOAD_TILE", lx, ly + t0);
+                p[0] = RAW_SYNC_TILE;
+                p[1] = RAW_SYNC_LOAD;
+                p[2] = ldw + ((uint64_t)(lx * 4) << 44) + ((uint64_t)(lx * 4) << 12);
+                p += 3;
+                loads++;
+                lbytes += (uint32_t)(CHUNK_W * (t1 - t0));
+                for (int r = t0, r1; r < t1; r = r1) {
+                    uint32_t bits = (uint32_t)(row_full[n][((ly + r) >> 3) & (RING_CY - 1)] >> (lx >> 3)) & 0xFF;
+                    r1 = ((r >> 3) + 1) << 3;
+                    if (r1 > t1) r1 = t1;
+                    while (r1 < t1 && ((uint32_t)(row_full[n][((ly + r1) >> 3) & (RING_CY - 1)] >> (lx >> 3)) & 0xFF) == bits)
+                        r1 = r1 + 8 < t1 ? r1 + 8 : t1;
+                    uint64_t yw = ((uint64_t)((y + r1 - t0) * 4) << 32) | (uint64_t)((y + r - t0) * 4);
+                    while (bits) {
+                        int c0 = r_ctz64(bits);
+                        int len = r_ctz64(~(uint64_t)(bits >> c0));
+                        bits &= ~(((1u << len) - 1) << c0);
+                        int rx0 = x + c0 * 8, rx1 = rx0 + len * 8;
+                        if (rx0 < xa) rx0 = xa;
+                        if (rx1 > xb) rx1 = xb;
+                        if (rx0 >= rx1) continue;
+                        p[0] = (0x24ull << 56) | ((uint64_t)(rx1 * 4) << 44) | yw | ((uint64_t)(rx0 * 4) << 12);
+                        p[1] = ((uint64_t)((rx0 - x) * 32) << 48) | ((uint64_t)((r - t0) * 32) << 32) | w1;
+                        p += 2;
+                        rects++;
+                        px += (uint32_t)((rx1 - rx0) * (r1 - r));
+                    }
+                }
+            }
+        }
+        raw_ptr = p;
+        r_stats.loads += loads; r_stats.load_bytes += lbytes;
+        r_rect_stats(&r_clip, rects, px);
+        return;
+    }
     for (; gy < gy1; gy += CHUNK_H, ly = (ly + CHUNK_H) & (RING_H - 1)) {
         /* load only the rows of the chunk that are inside the band */
         int t0 = gy < gy0 ? gy0 - gy : 0;
@@ -530,31 +652,193 @@ static void scroll_of(int n, int line, int *h, int *v) {
     }
 }
 
+/* Bands of lines with the same scroll (HBlank snapshots may differ per line)
+ * over the whole region: the layer cache is updated for each band as in the
+ * first pass of the frame (an update with the same arguments again is free),
+ * whatever part of it is drawn. */
+static int scan_band(int n, int y, int *h, int *v) {
+    scroll_of(n, y, h, v);
+    int y1 = R.gy1;
+    if (gba_line_regs_valid) {
+        y1 = y + 1;
+        while (y1 < R.gy1) {
+            int h2, v2;
+            scroll_of(n, y1, &h2, &v2);
+            if (h2 != *h || v2 != *v) break;
+            y1++;
+        }
+    }
+    return y1;
+}
+
+/* the bands of each layer, found once per frame (a layer is drawn in several
+ * passes and rectangles); more than BANDS_MAX: scanned every time */
+#define BANDS_MAX 16
+static struct { uint32_t frame; int gy0, gy1, n; int16_t y1[BANDS_MAX]; uint16_t h[BANDS_MAX], v[BANDS_MAX]; } bnd[4];
+
+static int next_band(int n, int y, int *h, int *v) {
+    if (bnd[n].frame != r_frame || bnd[n].gy0 != R.gy0 || bnd[n].gy1 != R.gy1) {
+        bnd[n].frame = r_frame; bnd[n].gy0 = R.gy0; bnd[n].gy1 = R.gy1; bnd[n].n = 0;
+        for (int yy = R.gy0, yy1; yy < R.gy1; yy = yy1) {
+            int hh, vv;
+            yy1 = scan_band(n, yy, &hh, &vv);
+            if (bnd[n].n == BANDS_MAX) { bnd[n].n = -1; break; }
+            bnd[n].y1[bnd[n].n] = (int16_t)yy1;
+            bnd[n].h[bnd[n].n] = (uint16_t)hh;
+            bnd[n].v[bnd[n].n] = (uint16_t)vv;
+            bnd[n].n++;
+        }
+    }
+    if (bnd[n].n < 0)
+        return scan_band(n, y, h, v);
+    int k = 0;
+    while (bnd[n].y1[k] <= y) k++;
+    *h = bnd[n].h[k]; *v = bnd[n].v[k];
+    return bnd[n].y1[k];
+}
+
+static void update_band(int n, uint32_t cnt, int h, int v, int y, int y1) {
+    /* only a single full-height band keeps the frame-to-frame window bookkeeping */
+    int single = y == R.gy0 && y1 == R.gy1;
+    const lstate_t *st = &ls[n];
+    if (st->frame == r_frame && st->ucnt == cnt && st->ux0 == h + R.gx0 && st->ux1 == h + R.gx1 &&
+        st->uy0 == v + y && st->uy1 == v + y1 && st->uinc == single && st->ukey_hook == (r_view->bg_entry != NULL))
+        return;                         /* done already in this frame */
+    uint64_t tu = get_ticks();
+    update_layer(n, cnt, h + R.gx0, h + R.gx1, v + y, v + y1, single);
+    r_stats.us_bg_update += (uint32_t)TICKS_TO_US(get_ticks() - tu);
+}
+
 void bg_draw_text(int n, int fx) {
     uint32_t cnt = io16(REG_BG0CNT + 2 * n);
+    if (R.wx1 <= R.wx0 || R.wy1 <= R.wy0) return;
     r_bind(PAL_BG, fx);
-    /* bands of lines with the same scroll (HBlank snapshots may differ per line) */
-    int y = R.gy0;
-    while (y < R.gy1) {
+    for (int y = R.gy0, y1; y < R.gy1; y = y1) {
         int h, v;
-        scroll_of(n, y, &h, &v);
-        int y1 = R.gy1;
-        if (gba_line_regs_valid) {
-            y1 = y + 1;
-            while (y1 < R.gy1) {
-                int h2, v2;
-                scroll_of(n, y1, &h2, &v2);
-                if (h2 != h || v2 != v) break;
-                y1++;
+        y1 = next_band(n, y, &h, &v);
+        update_band(n, cnt, h, v, y, y1);
+        int d0 = y > R.wy0 ? y : R.wy0, d1 = y1 < R.wy1 ? y1 : R.wy1;
+        if (d0 < d1)
+            draw_ring(n, h, v, d0, d1);
+    }
+}
+
+/* the slot flags of world row cy, columns cx..cx+63, as bits (bit i = column cx+i) */
+static inline void row_flags(int n, int cx, int cy, uint64_t *full, uint64_t *solid) {
+    unsigned s = (unsigned)cx & (RING_CX - 1);
+    uint64_t f = row_full[n][cy & (RING_CY - 1)], so = row_solid[n][cy & (RING_CY - 1)];
+    if (s) {
+        f = (f >> s) | (f << (64 - s));
+        so = (so >> s) | (so << (64 - s));
+    }
+    *full = f; *solid = so;
+}
+
+/* lowest << 8 | highest palette index over the opaque slots of the band */
+static uint32_t band_range(int n, uint32_t cnt, int h, int v, int y, int y1, uint32_t rng) {
+    uint32_t cb = ((cnt >> 2) & 3) * 0x4000u;
+    int bpp8 = (cnt & 0x80) != 0;
+    uint32_t lo = rng >> 8, hi = rng & 255;
+    int cx0 = (h + R.gx0) >> 3, cx1 = (h + R.gx1 - 1) >> 3;
+    for (int cy = (v + y) >> 3; cy <= (v + y1 - 1) >> 3; cy++) {
+        uint64_t f = row_full[n][cy & (RING_CY - 1)];
+        int row = (cy & (RING_CY - 1)) << 6;
+        for (int cx = cx0; cx <= cx1; cx++) {
+            int c = cx & (RING_CX - 1);
+            if (!((f >> c) & 1)) continue;
+            uint32_t r = slot_rng[n][row | c];
+            if (!r) {
+                /* the slot is current: its tile data in VRAM is what it shows */
+                uint32_t e = slot[n][row | c].key >> 16;
+                uint32_t a = cb + (e & 0x3FF) * (bpp8 ? 64u : 32u);
+                r = index_range(gba_mem.vram + (a >> 2), bpp8 ? 64 : 32, bpp8 ? 8 : 4, (e >> 12) << 4);
+                slot_rng[n][row | c] = (uint16_t)r;
             }
+            if (r >> 8 < lo) lo = r >> 8;
+            if ((r & 255) > hi) hi = r & 255;
         }
-        /* only a single full-height band keeps the frame-to-frame window bookkeeping */
-        int single = y == R.gy0 && y1 == R.gy1;
-        uint64_t tu = get_ticks();
-        update_layer(n, cnt, h + R.gx0, h + R.gx1, v + y, v + y1, single);
-        r_stats.us_bg_update += (uint32_t)TICKS_TO_US(get_ticks() - tu);
-        draw_ring(n, h, v, y, y1);
-        y = y1;
+    }
+    return (lo << 8) | hi;
+}
+
+uint32_t bg_text_colour_max(int n) {
+    uint32_t cnt = io16(REG_BG0CNT + 2 * n);
+    uint32_t rng = 0xFF00;
+    int h, v;
+    int y1 = next_band(n, R.gy0, &h, &v);
+    if (y1 == R.gy1) {
+        update_band(n, cnt, h, v, R.gy0, y1);
+        vkey_t k = { 1, h, v, R.gx0, R.gy0, R.gx1, R.gy1, rng_gen[n] };
+        if (!memcmp(&k, &rkey[n], sizeof k)) {
+            rng = rc_rng[n];
+        } else {
+            rng = band_range(n, cnt, h, v, R.gy0, y1, rng);
+            rkey[n] = k;
+            rc_rng[n] = rng;
+        }
+    } else {
+        for (int y = R.gy0; y < R.gy1; y = y1) {
+            y1 = next_band(n, y, &h, &v);
+            update_band(n, cnt, h, v, y, y1);
+            rng = band_range(n, cnt, h, v, y, y1, rng);
+        }
+    }
+    uint32_t m[3] = { 0, 0, 0 };
+    for (uint32_t i = rng >> 8; i <= (rng & 255); i++) {
+        uint32_t c = r_pal16(i);
+        for (int k = 0; k < 3; k++, c >>= 5)
+            if ((c & 31) > m[k]) m[k] = c & 31;
+    }
+    return m[0] | (m[1] << 5) | (m[2] << 10);
+}
+
+/* bg_text_cells for one band of lines with scroll (h, v) */
+static void band_cells(int n, int h, int v, int y, int y1, cmask_t *touch, cmask_t *solid) {
+    uint64_t cols = (1ull << cm_w) - 1;
+    /* screen cell i covers world columns cxs+i (and cxs+i+1 if the scroll is
+     * not a multiple of 8): one bit per world column, then per cell */
+    int X0 = h + R.gx0, cxs = X0 >> 3, split = (X0 & 7) != 0;
+    int j0 = (y - R.gy0) >> 3, j1 = (y1 - 1 - R.gy0) >> 3;
+    for (int j = j0; j <= j1; j++) {
+        int ya = R.gy0 + 8 * j, yb = ya + 8;
+        if (ya < y) ya = y;
+        if (yb > y1) yb = y1;
+        uint64_t t = 0, s = ~0ull;
+        for (int cy = (v + ya) >> 3; cy <= (v + yb - 1) >> 3; cy++) {
+            uint64_t f, so;
+            row_flags(n, cxs, cy, &f, &so);
+            if (split) { f |= f >> 1; so &= so >> 1; }     /* (cm_w <= 63: bit cm_w is valid) */
+            t |= f; s &= so;
+        }
+        touch->r[j] |= t & cols;
+        solid->r[j] &= s;
+    }
+}
+
+void bg_text_cells(int n, cmask_t *touch, cmask_t *solid) {
+    uint32_t cnt = io16(REG_BG0CNT + 2 * n);
+    uint64_t cols = (1ull << cm_w) - 1;
+    for (int j = 0; j < cm_h; j++) solid->r[j] = cols;
+    int h, v;
+    int y1 = next_band(n, R.gy0, &h, &v);
+    if (y1 == R.gy1) {
+        update_band(n, cnt, h, v, R.gy0, y1);
+        vkey_t k = { 1, h, v, R.gx0, R.gy0, R.gx1, R.gy1, mask_gen[n] };
+        if (memcmp(&k, &mkey[n], sizeof k)) {
+            for (int j = 0; j < cm_h; j++) { mc_touch[n].r[j] = 0; mc_solid[n].r[j] = cols; }
+            band_cells(n, h, v, R.gy0, y1, &mc_touch[n], &mc_solid[n]);
+            mkey[n] = k;
+        }
+        for (int j = 0; j < cm_h; j++) {
+            touch->r[j] |= mc_touch[n].r[j];
+            solid->r[j] = mc_solid[n].r[j];
+        }
+        return;
+    }
+    for (int y = R.gy0; y < R.gy1; y = y1) {
+        y1 = next_band(n, y, &h, &v);
+        update_band(n, cnt, h, v, y, y1);
+        band_cells(n, h, v, y, y1, touch, solid);
     }
 }
 
