@@ -38,6 +38,8 @@ void gba_boot(void);
 #define ROM_CACHE_BYTES  (2 * 1024 * 1024)
 #define ROM_HEAP_RESERVE (192 * 1024)
 #define GAME_STACK       (256 * 1024)
+#define GAME_STACK_TOP_INDEX 0x1000                 /* see main() */
+#define GAME_STACK_ALLOC (GAME_STACK + 0x2000)
 /* the GBA produces 267.52 samples per frame; we show one GBA frame per N64
  * refresh, so the audio rate follows the N64 refresh rate */
 #define AUDIO_SAMPLES_PER_FRAME 267.52f
@@ -603,15 +605,13 @@ int main(void) {
         prof_watchdog_start();
     load_save();
     /* the ROM cache takes what is left, up to ROM_CACHE_BYTES, after the
-     * game stack (allocated after it: its place in the D-cache's index
-     * space, relative to the hot data, is what the timings were tuned with),
-     * keeping ROM_HEAP_RESERVE for later allocations (the renderer's
-     * affine/bitmap raster buffers, libc) and 16KB for the cache's
-     * alignment */
+     * game stack, keeping ROM_HEAP_RESERVE for later allocations (the
+     * renderer's affine/bitmap raster buffers, libc) and 16KB for the
+     * cache's alignment */
     {
         heap_stats_t hs0;
         sys_get_heap_stats(&hs0);
-        int cache = hs0.total - hs0.used - GAME_STACK - ROM_HEAP_RESERVE - 0x4000;
+        int cache = hs0.total - hs0.used - GAME_STACK_ALLOC - ROM_HEAP_RESERVE - 0x4000;
         if (cache > ROM_CACHE_BYTES)
             cache = ROM_CACHE_BYTES;
         cache &= ~0x3FFF;
@@ -619,9 +619,16 @@ int main(void) {
                hs0.total - hs0.used, cache / 1024);
         rom_cache_init(cache);
     }
-    uint8_t *stack = memalign(16, GAME_STACK);
+    /* The game stack's top sits at offset GAME_STACK_TOP_INDEX of the
+     * D-cache's 8KB index space (direct mapped): every recompiled call
+     * spills to it, and where it falls against the hot data (the guest
+     * stack and variables in IWRAM, cpu, the dispatch table) is worth up to
+     * 1.2 ms per frame.  Measured at every 1KB step (game + draw in LoG2's
+     * and Buu's Fury's field play), 0x1000 is the best for both. */
+    uint8_t *stack = memalign(8192, GAME_STACK_ALLOC);
     if (!stack)
-        gba_panic("cannot allocate the game stack (%d bytes)", GAME_STACK);
+        gba_panic("cannot allocate the game stack (%d bytes)", GAME_STACK_ALLOC);
+    uint8_t *stack_top = stack + GAME_STACK + GAME_STACK_TOP_INDEX;
     rom_cache_preload();
     debugf("rom cache: %lu pages preloaded\n", (unsigned long)rom_cache_stats.preloaded);
 #ifdef GBA_TLB
@@ -640,5 +647,5 @@ int main(void) {
     heap_stats_t hs;
     sys_get_heap_stats(&hs);
     debugf("heap: %d of %d bytes used, %d free\n", hs.used, hs.total, hs.total - hs.used);
-    run_game_on_stack(stack + GAME_STACK);
+    run_game_on_stack(stack_top);
 }
