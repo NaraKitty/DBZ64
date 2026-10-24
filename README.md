@@ -161,7 +161,7 @@ game for the build scripts and the N64 Makefile; `tools/recomp.py` takes
 | `GAME` | Game | Dump (SHA-1) | Status |
 |---|---|---|---|
 | `log2` | The Legacy of Goku II (USA, `ALFE`) | `18e0715dec419f3501c301511530d2edcd590f8b` | complete |
-| `buu` | Buu's Fury (USA, `BG3E`) | `f1c4b07554d2a3b1ad2f325307051e775ce68087` | in progress: plays on the host build and on N64 with the RDP renderer at full speed, native 240×160 view |
+| `buu` | Buu's Fury (USA, `BG3E`) | `f1c4b07554d2a3b1ad2f325307051e775ce68087` | in progress: plays on the host build and on N64 with the RDP renderer at full speed; 320×240 view on field maps, other screens native 240×160 |
 
 For Buu's Fury use `games/buu/game.toml`, `--game buu` and `GAME=buu` in the
 steps above.

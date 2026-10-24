@@ -31,7 +31,7 @@ games (the same engine and toolchain). Each game directory holds:
 - `game.h`: what the runtime and the platforms need: the IRQ dispatcher's
   handler table, flags word, return sentinel and test order, the ROM identity
   (game code, SHA-1), the N64 cartridge title and SRAM save magic.
-- C sources compiled into that game's build (for LoG2, the 320×240 field view
+- C sources compiled into that game's build (the 320×240 field view
   `widescreen.c`).
 
 `GAME=log2|buu` selects the game in `platform/host/build.sh`, the N64
@@ -53,8 +53,12 @@ adapter libraries and ARM soft-float code. What differs from LoG2:
   table below).
 - The sound engine, mixer and FIFO model are LoG2's (`native_mix_voice` and
   `native_clip` apply unchanged).
-- No 320×240 field view yet: `games/buu/widescreen.c` always gives the
-  native view.
+- The 320×240 field view (`games/buu/widescreen.c`, `docs/WIDESCREEN.md`,
+  "Buu's Fury") is LoG2's design with this game's addresses. Three things
+  are new: the view also stays inside what the parallax layers can show,
+  an empty layer class is accepted, and the field view stays on while the
+  game pauses the field. Some emitters add signed y offsets as unsigned
+  bytes, and their hooks correct for it.
 
 Status: the host build plays from power-on through the logos, title, a new
 game and the story intro into gameplay with no dispatch misses. It matches
@@ -74,7 +78,7 @@ dialogue with portraits 5.5 + 2.1 ms, the animated title 5.4 + 0.9 ms
 (measurements below). Code is 3.4 MB of MIPS and BSS 1.15 MB; the ROM
 cache gets the remaining 1.2 MB.
 
-Open: the field view; the Mode-7 style overworld (HBlank per-line BG2
+Open: the Mode-7 style overworld (HBlank per-line BG2
 affine) and the scenes that write MOSAIC were not reached with scripted
 input (the renderer's per-line affine and mosaic paths are checked with
 synthetic states); register summaries of the ARM soft-float routines
