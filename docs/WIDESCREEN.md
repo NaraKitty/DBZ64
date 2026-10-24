@@ -538,8 +538,9 @@ there. Pokes (host `--poke`, N64 test script `poke`): frame 1995
 ## Buu's Fury (`games/buu`)
 
 Buu's Fury runs the same engine, so it uses the same design.
-`games/buu/widescreen.c` is LoG2's code with the Buu's Fury addresses, plus
-four additions:
+`games/buu/widescreen.c` is LoG2's code with the Buu's Fury addresses (with
+LoG2's continuous anchoring of screen-space clusters and its location-banner
+extension), plus four additions:
 - parallax-aware view placement
 - one more layer class
 - paused fields stay in the field view
@@ -715,18 +716,40 @@ emitters have no pack idiom.
   | `0x08049F60` | dialogue window and portrait (always visible, emit `0x0800B374`) |
   | `0x08049FEC` | HUD: icon and health / ki bars at (8,3) (emit `0x0800BCC8`); slides in from y = -6 |
   | `0x0804B3D8` | chapter title card |
-  | `0x0804B528` | location banner, 8 sprites of 32x32 across y = 128 (cull `0x0800BF94`) |
+  | `0x0804B528` | location banner, 8 sprites of 32x16 across y = 128 (cull `0x0800BF94`); extended to the full width, see below |
   | `0x0804B500` | HUD bars at constant x 8/40/56 (emit `0x0800BE4E` → `0x0800B99C`) |
   | `0x0804CE28` | boss HP bar: two 32x8 sprites at (160,y) and (192,y), constant attr1 (emit `0x08019658`) |
+  | `0x0804C070` | "STAT" icon at (92,y) after a level-up (emit `0x0800B55C`); joins the HUD's cluster through its owner `[obj+0x18]` |
+  | `0x0804B4D8` | countdown timer at (8,136-y) (emit `0x0800B6A2`) |
+  | `0x0804C974` | dialogue Yes/No choice cursor (isVisible `0x0801794C`, emit `0x0801796B`): blinks, placed at its owner's position (the window, `[obj+0x14]`) minus (16,12); it lies inside the window and joins its cluster by touch |
   | ScreenSprite cull `0x0804FBCC` | |
 
-- **HUD pieces that never cluster by touch:** `0x08049FEC`, `0x0804B500` and
-  `0x0804CE28`.
+- **HUD pieces that never cluster by touch:** `0x08049FEC`, `0x0804B500`,
+  `0x0804CE28`, `0x0804C070` and `0x0804B4D8`.
+- **The choice cursor** used to count as a world object (an unknown class),
+  so in the 320x240 view it stayed at its native place while the window
+  was re-anchored: 34 px above the window, over the map.
 - **Not seen in testing:** `0x0804B500` and `0x0804CE28`. They come from a
   static scan of always-visible classes (isVisible `0x0804FC40`/`0x0804FC3C`)
   whose emitters write a constant screen x.
 - **Stay world:** always-visible classes whose emitters read the camera. One
   of them is the targeting reticle (vt `0x0804E41C`, emit `0x080223B2`).
+
+**Placement** is LoG2's (`anchor()`): every cluster keeps its fraction of
+the free space, inside the 8 px inset, so a dialogue box sliding between
+bottom and top (R/L) moves smoothly; the earlier rule (snap to a third)
+made it jump 36 px twice on the way.  The HUD's sprites at native (8,8)
+land at (19,20) of the 320x240 screen (with the thirds: (16,16)); a
+resting bottom box stays at the bottom edge.
+
+**Location banners** (`0x0804B528`): 8 sprites of 32x16 at y 128, native x
+0..256; the banner ends at the native edge x 240 (the rightmost sprite is
+transparent past it).  `extend_banner` adds copies of the leftmost sprite
+whose every pixel row is one colour (the stripes) at x -32 and -64 and at
+x 240 and 272 when the shadow OAM is uploaded, as in LoG2: free shadow
+slots, flagged in the side table (not hidden as off-screen), cleared by the
+next build.  The cluster box stays the native width, so the banner stays
+centred and now spans all 320 px.
 
 ### Culling and despawn
 
@@ -872,7 +895,6 @@ ms).
 - **RDP time on hardware.** The field's blend frames (BLDCNT `0x1041`) tag
   most of BG0's cells in the 32-bit path; the cost model puts them at 29-41
   ms of RDP time per frame at 320x240 (`docs/RDP_COST.md`, "Buu's Fury").
-- **Not ported from LoG2's later work:** continuous HUD anchoring (a cluster
-  still snaps to the left/centre/right and top/middle/bottom third of the
-  screen, so a box sliding across a third jumps) and the margin fill of maps
-  smaller than the view.
+- **Not ported from LoG2's later work:** the margin fill of maps smaller
+  than the view, and LoG2's pause-menu and file-select view (Buu's menus use
+  other layers; they stay native).

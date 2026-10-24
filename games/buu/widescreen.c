@@ -622,7 +622,7 @@ static const uint32_t screen_vts[] = {
     0x08049F60,     /* dialogue window and portrait (emit 0x0800B374) */
     0x08049FEC,     /* HUD: portrait, health and ki bars at (8,3) (emit 0x0800BCC8) */
     0x0804B3D8,     /* chapter title card (emit 0x0802BFEC) */
-    0x0804B528,     /* location banner, 8x 32x32 at y 128 (emit 0x0800BFCE) */
+    0x0804B528,     /* location banner, 8x 32x16 at y 128 (emit 0x0800BFCE) */
     /* always-visible classes whose emitters write constant screen x */
     0x0804B500,     /* HUD bars at x 8, 40, 56.. (emit 0x0800BE4E -> 0x0800B99C) */
     0x0804CE28,     /* boss HP bar, 2x 32x8 at (160,y), (192,y) (emit 0x08019658) */
@@ -631,6 +631,10 @@ static const uint32_t screen_vts[] = {
      * their status ends */
     0x0804C070,     /* "STAT" icon at (92,y) after a level-up (emit 0x0800B55C, owner obj+0x18) */
     0x0804B4D8,     /* countdown timer at (8,136-y) (emit 0x0800B6A2) */
+    /* dialogue choice cursor: isVisible 0x0801794C / emit 0x0801796B follow
+     * the owner [obj+0x14] (the dialogue window); it lies inside the window,
+     * so it joins the window's cluster by touching it */
+    0x0804C974,
 };
 
 /* Persistent HUD pieces anchor on their own: they never join another
@@ -666,6 +670,7 @@ typedef struct {
     int32_t x, y;           /* exact screen position (when flagged) */
     uint16_t a0, a1;        /* attributes as emitted (validation) */
     uint8_t has_x, has_y, cls;
+    uint8_t ext;            /* added by the view (banner extension), not by the game */
 } side_t;
 static side_t side_build[128], side_live[128];
 /* slots ever written: everything above is zero in both arrays, so clears
@@ -785,7 +790,7 @@ void ws_hook_emit_end(const uint32_t *regs) {
         s->cls = (uint8_t)cls;
         s->a0 = (uint16_t)a0;
         s->a1 = (uint16_t)a1;
-        s->has_x = s->has_y = 0;
+        s->has_x = s->has_y = s->ext = 0;
         for (int k = kx; k < ncx; k++)
             if (((uint32_t)cand_x[k] & 0x1FF) == (a1 & 0x1FF)) {
                 s->x = cand_x[k];
@@ -817,9 +822,122 @@ void ws_hook_emit_end(const uint32_t *regs) {
     }
 }
 
+static const uint8_t obj_dim[3][4][2] = {
+    { { 8, 8 }, { 16, 16 }, { 32, 32 }, { 64, 64 } },
+    { { 16, 8 }, { 32, 8 }, { 32, 16 }, { 64, 32 } },
+    { { 8, 16 }, { 8, 32 }, { 16, 32 }, { 32, 64 } },
+};
+
+/* Location banners (vt 0x0804B528) are a row of 8 32x16 sprites at y 128,
+ * native x 0..256, opaque up to the native edge x 240.  The view extends
+ * them to its full width: copies of a piece that holds only the stripes
+ * (every row one colour: the leftmost such piece; the rightmost one is
+ * partly transparent) are added left of x 0 and from x 240 on when the
+ * shadow OAM is uploaded.  They take free shadow slots (the overflow guard
+ * keeps 16 free while the view is widened) and share the attributes of
+ * the source; the next build clears them. */
+#define VT_BANNER 0x0804B528u
+#define BANNER_EXT 40           /* px added on each side */
+
+static inline void iw16_set(uint32_t a, uint32_t v) {
+    *(uint16_t *)((uint8_t *)gba_mem.iwram + ((a & 0x7FFEu) ^ GBA_HX)) = (uint16_t)v;
+}
+
+/* every row of the sprite (attributes a0/a2, w x h) is a single colour */
+static int obj_rows_plain(uint32_t a0, uint32_t a2, int w, int h) {
+    int bpp8 = (a0 & 0x2000) != 0, map1d = (io16(REG_DISPCNT) & 0x40) != 0;
+    const uint8_t *v = (const uint8_t *)gba_mem.vram;
+    for (int y = 0; y < h; y++) {
+        int first = -1;
+        for (int x = 0; x < w; x++) {
+            uint32_t t = (a2 & 0x3FF) + (uint32_t)(map1d ? (y >> 3) * (w >> 3) * (bpp8 ? 2 : 1) : (y >> 3) * 32)
+                         + (uint32_t)(x >> 3) * (bpp8 ? 2 : 1);
+            uint32_t o = 0x10000u + (t & 0x3FF) * 32u;
+            int px;
+            if (bpp8) {
+                px = v[(o + (uint32_t)((y & 7) * 8 + (x & 7))) ^ GBA_BX];
+            } else {
+                uint32_t b = v[(o + (uint32_t)((y & 7) * 4 + ((x & 7) >> 1))) ^ GBA_BX];
+                px = (int)((x & 1) ? b >> 4 : b & 15);
+            }
+            if (first < 0)
+                first = px;
+            else if (px != first)
+                return 0;
+        }
+    }
+    return 1;
+}
+
+static void extend_banner(void) {
+    int piece[16], px[16], np = 0, minx = 1 << 20, maxx = -(1 << 20);
+    for (int i = 0; i < build_used && np < 16; i++) {
+        const side_t *s = &side_build[i];
+        if (!s->obj || s->vt != VT_BANNER || s->ext)
+            continue;
+        uint32_t a0 = iw16(SHADOW_OAM + 8u * (uint32_t)i), a1 = iw16(SHADOW_OAM + 8u * (uint32_t)i + 2);
+        if ((a0 & 0x300) == 0x200 || (a0 >> 14) == 3)
+            continue;
+        int w = obj_dim[a0 >> 14][a1 >> 14][0];
+        int x = (int)(a1 & 0x1FF);
+        if (x >= 256)
+            x -= 512;
+        minx = imin(minx, x);
+        maxx = imax(maxx, x + w);
+        piece[np] = i;
+        px[np++] = x;
+    }
+    if (!np || minx > 0 || maxx < 240)
+        return;
+    /* the source: the leftmost piece whose rows are each one colour (not
+     * a double-size affine one) */
+    int src = -1, sw = 0;
+    uint32_t a0 = 0, a1 = 0, a2 = 0;
+    for (int tried = 0; tried < np && src < 0; tried++) {
+        int b = -1;
+        for (int k = 0; k < np; k++)
+            if (piece[k] >= 0 && (b < 0 || px[k] < px[b]))
+                b = k;
+        uint32_t sa = SHADOW_OAM + 8u * (uint32_t)piece[b];
+        a0 = iw16(sa); a1 = iw16(sa + 2); a2 = iw16(sa + 4);
+        int w = obj_dim[a0 >> 14][a1 >> 14][0], h = obj_dim[a0 >> 14][a1 >> 14][1];
+        if (!(a0 & 0x200) && obj_rows_plain(a0, a2, w, h)) {
+            src = piece[b];
+            sw = w;
+        }
+        piece[b] = -1;
+    }
+    if (src < 0)
+        return;
+    int slot = build_used;
+    for (int side = 0; side < 2; side++)
+        for (int k = 0; k * sw < BANNER_EXT; k++) {
+            if (slot >= 128)
+                return;
+            int x = side ? 240 + k * sw : minx - (k + 1) * sw;
+            uint32_t a = SHADOW_OAM + 8u * (uint32_t)slot;
+            uint32_t n1 = (a1 & ~0x1FFu) | ((uint32_t)x & 0x1FF);
+            iw16_set(a, a0);
+            iw16_set(a + 2, n1);
+            iw16_set(a + 4, a2);
+            side_t *d = &side_build[slot];
+            *d = side_build[src];
+            d->a1 = (uint16_t)n1;
+            d->x = x;
+            d->has_x = 1;
+            d->ext = 1;
+            slot++;
+            build_used = slot;
+            if (slot > side_hwm)
+                side_hwm = slot;
+        }
+}
+
 /* 0x08011586 / 0x080117C6: the shadow OAM is copied to OAM */
 void ws_hook_oam_upload(const uint32_t *regs) {
     (void)regs;
+    if (widen_active())
+        extend_banner();
     memcpy(side_live, side_build, (size_t)side_hwm * sizeof(side_t));
     live_valid = 1;
     st.slots_used = build_used;
@@ -829,20 +947,28 @@ void ws_hook_oam_upload(const uint32_t *regs) {
 
 /* ------------------------------------------------------------ per-frame sprite positions */
 
-static const uint8_t obj_dim[3][4][2] = {
-    { { 8, 8 }, { 16, 16 }, { 32, 32 }, { 64, 64 } },
-    { { 16, 8 }, { 32, 8 }, { 32, 16 }, { 64, 32 } },
-    { { 8, 16 }, { 8, 32 }, { 16, 32 }, { 32, 64 } },
-};
-
 #define HIDDEN (-4096)
 static int16_t pos_x[128], pos_y[128];
 static uint8_t pos_ok[128];
 
+/* Offset that moves a screen-space cluster at native position p (size
+ * 'size', on a native axis of 'native' pixels) into a view axis of 'view'
+ * pixels: it keeps the same fraction of the free space, inside 'inset'.
+ * Clusters at an edge stay at that edge and centred ones stay centred,
+ * and anything moving between them moves continuously (the dialogue box
+ * slides between bottom and top with R/L; a top/middle/bottom choice made
+ * it jump mid-slide).  The same as LoG2's (games/log2/widescreen.c). */
+static int anchor(int p, int size, int native, int view, int inset) {
+    int free_n = native - size, free_v = view - 2 * inset - size;
+    if (free_n <= 0 || free_v <= 0)
+        return (view - size) / 2 - p;
+    return inset + (p * free_v + free_n / 2) / free_n - p;
+}
+
 static void compute_obj_positions(void) {
     int cls[128], bw[128], bh[128], gx[128], gy[128];
     uint32_t owner[128];
-    uint8_t hud[128];
+    uint8_t hud[128], ext[128];
     int nscreen = 0, ex = 0, ey = 0;
     for (int i = 0; i < 128; i++) {
         pos_ok[i] = 0;
@@ -879,6 +1005,7 @@ static void compute_obj_positions(void) {
         if (known && s->vt == VT_STAT_ICON && is_ewram(g32(s->obj + 0x18), 4))
             owner[i] = g32(s->obj + 0x18);
         hud[i] = known && is_hud(s->vt);
+        ext[i] = known && s->ext;
         gx[i] = x;
         gy[i] = y;
         pos_ok[i] = 1;
@@ -895,13 +1022,14 @@ static void compute_obj_positions(void) {
     if (!nscreen)
         return;
 
-    /* Screen-space objects: hide what the GBA would not show, then group
-     * touching boxes (and the entries of one object) into clusters and snap
-     * each cluster to the nearest edge / centre of the 320x240 screen. */
+    /* Screen-space objects: hide what the GBA would not show (but the view's
+     * banner extension), then group touching boxes (and the entries of one
+     * object) into clusters and move each cluster to the same place in the
+     * 320x240 screen's free space (anchor()). */
     int idx[128], n = 0;
     for (int i = 0; i < 128; i++) {
         if (cls[i] != CLS_SCREEN) continue;
-        if (gx[i] + bw[i] <= 0 || gx[i] >= 240 || gy[i] + bh[i] <= 0 || gy[i] >= 160) {
+        if (!ext[i] && (gx[i] + bw[i] <= 0 || gx[i] >= 240 || gy[i] + bh[i] <= 0 || gy[i] >= 160)) {
             pos_x[i] = HIDDEN;            /* parked off-screen */
             pos_y[i] = HIDDEN;
             continue;
@@ -940,13 +1068,12 @@ static void compute_obj_positions(void) {
     }
     for (int k = 0; k < n; k++) {
         int r = root[k], i = idx[k];
-        /* the cluster box, clipped to the native screen, picks the anchor:
-         * left / centre / right third, top / middle / bottom third */
+        /* the cluster box, clipped to the native screen, keeps its place in
+         * the free space: see anchor() */
         int x0 = imax(bx0[r], 0), x1 = imin(bx1[r], 240);
         int y0 = imax(by0[r], 0), y1 = imin(by1[r], 160);
-        int cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
-        int fx = cx < 80 ? ws_hud_inset : cx >= 160 ? 80 - ws_hud_inset : 40;
-        int fy = cy < 54 ? ws_hud_inset : cy >= 107 ? 80 - ws_hud_inset : 40;
+        int fx = anchor(x0, x1 - x0, 240, 320, ws_hud_inset);
+        int fy = anchor(y0, y1 - y0, 160, 240, ws_hud_inset);
         /* framebuffer = native + f; screen coordinate = framebuffer - (-OX) */
         pos_x[i] = (int16_t)(gx[i] + fx + OX);
         pos_y[i] = (int16_t)(gy[i] + fy + OY);
