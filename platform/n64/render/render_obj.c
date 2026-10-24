@@ -378,9 +378,11 @@ static void draw_regular(const objinfo_t *o, int x, int y) {
     uint32_t row_stride = row_stride_of(o);
     objinfo_t tmp;
     if (o->bpp8 && !one_d) { tmp = *o; tmp.tile &= ~1u; o = &tmp; }
-    const int gx0 = R.wx0, gy0 = R.wy0, gx1 = R.wx1, gy1 = R.wy1;
-    const int hf = o->hf, vf = o->vf;
     const rclip_t c = r_clip;
+    /* tiles outside the clip rectangle (inside the draw window: a part of
+     * it beside the CPU-composited holes) are not expanded or loaded */
+    const int gx0 = c.x0 - c.tx, gy0 = c.y0 - c.ty, gx1 = c.x1 - c.tx, gy1 = c.y1 - c.ty;
+    const int hf = o->hf, vf = o->vf;
     emit_t e = { raw_ptr, raw_end - (6 + 3 + 2 * 32 + 4), NULL, 0, 0, 0, 0, 0, 0 };
     for (int r = 0; r < th; r++) {
         int sy = y + (vf ? th - 1 - r : r) * 8;
@@ -488,15 +490,31 @@ static void draw_affine(const objinfo_t *o, int x, int y) {
 
 /* ------------------------------------------------------------ CPU-composited part */
 
-/* The rectangle [hole_x0, hole_x1) x [hole_y0, hole_y1) (GBA coordinates,
- * inside the region) whose OBJ pixels come from cpu_compose_line, and the
- * OBJs that meet it, in OAM order */
-static int hole_on, hole_x0, hole_y0, hole_x1, hole_y1;
+/* Up to MAX_HOLES pairwise disjoint rectangles ("holes", GBA coordinates,
+ * inside the region) whose OBJ pixels come from cpu_compose_line: the
+ * places where one OBJ at a time is not the GBA's OBJ layer, gathered into
+ * clusters (two conflicts far apart give two small holes, not one box over
+ * both).  cpu_list holds the OBJs that meet a hole, in OAM order; each hole
+ * lists the ones meeting it (indices into cpu_list, in OAM order too). */
+#define MAX_HOLES 4
+#define HOLE_GAP  8                     /* holes closer than this merge */
+typedef struct {
+    int x0, y0, x1, y1;
+    int n;
+    uint8_t obj[128];
+    int comp_off;                       /* its composition in comp_col/comp_ps, -1: composed per line */
+    int composed;                       /* done this frame */
+} hole_t;
+static hole_t holes[MAX_HOLES];
+static int nholes;
 static uint8_t cpu_list[128];
 static int16_t cpu_box[128][3][4];      /* their boxes over the region (obj_boxes) */
 static uint8_t cpu_nbox[128];
 static int cpu_n;
 static uint32_t cpu_cmax_frame, cpu_cmax;   /* obj_cpu_colour_max of this frame */
+/* storage of the hole compositions (obj_cpu_draw) */
+#define COMP_MAX 16384
+static uint8_t comp_col[COMP_MAX], comp_ps[COMP_MAX];
 
 static inline int fmod_i(int a, int m) {
     int r = a % m;
@@ -534,8 +552,63 @@ static inline void grow(int *x0, int *y0, int *x1, int *y1, int a, int b, int c,
         *y1 = d;
 }
 
-int obj_cpu_begin(uint8_t lists[4][128], const int counts[4], int blend, uint8_t codes[8]) {
-    hole_on = 0;
+/* ---- gathering the conflict rectangles into holes ---- */
+
+typedef struct { int x0, y0, x1, y1; } hrect_t;
+static hrect_t hr[MAX_HOLES + 1];
+static int nhr;
+
+static inline int hr_near(const hrect_t *a, const hrect_t *b) {
+    return a->x0 < b->x1 + HOLE_GAP && b->x0 < a->x1 + HOLE_GAP &&
+           a->y0 < b->y1 + HOLE_GAP && b->y0 < a->y1 + HOLE_GAP;
+}
+
+static inline int hr_area(const hrect_t *a) {
+    return (a->x1 - a->x0) * (a->y1 - a->y0);
+}
+
+static inline hrect_t hr_union(const hrect_t *a, const hrect_t *b) {
+    hrect_t u = *a;
+    grow(&u.x0, &u.y0, &u.x1, &u.y1, b->x0, b->y0, b->x1, b->y1);
+    return u;
+}
+
+/* add r, absorbing every hole near it (the holes stay pairwise apart) */
+static void hr_insert(hrect_t r) {
+    for (int k = 0; k < nhr;) {
+        if (hr_near(&hr[k], &r)) {
+            r = hr_union(&r, &hr[k]);
+            hr[k] = hr[--nhr];
+            k = 0;                      /* the grown r may now be near an earlier one */
+        } else {
+            k++;
+        }
+    }
+    hr[nhr++] = r;
+}
+
+static void hole_add(int x0, int y0, int x1, int y1) {
+    hr_insert((hrect_t){ x0, y0, x1, y1 });
+    while (nhr > MAX_HOLES) {
+        /* too many: merge the pair whose bounding box adds the least area */
+        int ba = 0, bb = 1, best = 1 << 30;
+        for (int a = 0; a < nhr; a++)
+            for (int b = a + 1; b < nhr; b++) {
+                hrect_t u = hr_union(&hr[a], &hr[b]);
+                int add = hr_area(&u) - hr_area(&hr[a]) - hr_area(&hr[b]);
+                if (add < best) { best = add; ba = a; bb = b; }
+            }
+        hrect_t u = hr_union(&hr[ba], &hr[bb]);
+        hr[bb] = hr[--nhr];                     /* bb > ba: remove bb first */
+        hr[ba] = hr[--nhr];
+        hr_insert(u);
+    }
+}
+
+int obj_cpu_begin(uint8_t lists[4][128], const int counts[4], int blend, uint32_t bgpm,
+                  uint8_t codes[OBJ_CPU_MAX_ITEMS]) {
+    nholes = 0;
+    nhr = 0;
     uint32_t mosaic = io16(REG_MOSAIC);
     int omos = (mosaic & 0xFF00) != 0;          /* OBJ mosaic larger than 1x1 */
     static uint8_t listed[128];
@@ -547,8 +620,6 @@ int obj_cpu_begin(uint8_t lists[4][128], const int counts[4], int blend, uint8_t
     for (int p = 0; p < 4; p++)
         for (int k = 0; k < counts[p]; k++)
             listed[lists[p][k]] = 1;
-    int x0 = 1 << 30, y0 = 1 << 30, x1 = -(1 << 30), y1 = -(1 << 30);
-#define GROW(a, b, c, d) grow(&x0, &y0, &x1, &y1, (a), (b), (c), (d))
     for (int i = 0; i < 128; i++) {
         if (!listed[i])
             continue;
@@ -558,79 +629,129 @@ int obj_cpu_begin(uint8_t lists[4][128], const int counts[4], int blend, uint8_t
             continue;
         if (omos && o->mosaic)
             for (int b = 0; b < nbox[n]; b++)
-                GROW(box[n][b][0], box[n][b][1], box[n][b][2], box[n][b][3]);
+                hole_add(box[n][b][0], box[n][b][1], box[n][b][2], box[n][b][3]);
         idx[n++] = (uint8_t)i;
     }
     /* a later OBJ with a better priority over an earlier one; with alpha
      * blending (OBJ_CPU_BLEND_*), any OBJ over another one that blends */
+    uint32_t objpm = 0;                         /* priorities of the OBJs */
+    for (int k = 0; k < n; k++)
+        objpm |= 1u << info[idx[k]].prio;
+    int budget = 4096;                          /* third-OBJ box tests (then: always a hole) */
     for (int a = 0; a < n; a++) {
         int pa = info[idx[a]].prio, sa = info[idx[a]].semi;
         if (!pa && !blend)
             continue;
         for (int b = a + 1; b < n; b++) {
-            int over = info[idx[b]].prio < pa;
+            /* The later OBJ's transparent texels lift the earlier one's
+             * pixels to its priority pb.  That only changes the picture
+             * where a layer that painter's order draws after the earlier
+             * OBJ, a priority in [pb, pa), lies under the lifted pixel: a
+             * displayed BG (an OBJ wins a tie with a BG), or a third OBJ
+             * meeting the overlap. */
+            int pb = info[idx[b]].prio;
+            uint32_t lift = pb < pa ? (1u << pa) - (1u << pb) : 0;
+            int over = (bgpm & lift) != 0;
             if (blend == OBJ_CPU_BLEND_ALL || (blend == OBJ_CPU_BLEND_SEMI && (sa || info[idx[b]].semi)))
                 over = 1;
-            if (!over)
+            if (!over && !(objpm & lift))
                 continue;
             for (int i = 0; i < nbox[a]; i++)
                 for (int j = 0; j < nbox[b]; j++) {
                     const int16_t *p = box[a][i], *q = box[b][j];
                     int ix0 = p[0] > q[0] ? p[0] : q[0], iy0 = p[1] > q[1] ? p[1] : q[1];
                     int ix1 = p[2] < q[2] ? p[2] : q[2], iy1 = p[3] < q[3] ? p[3] : q[3];
-                    if (ix0 < ix1 && iy0 < iy1)
-                        GROW(ix0, iy0, ix1, iy1);
+                    if (ix0 >= ix1 || iy0 >= iy1)
+                        continue;
+                    int third = over;
+                    for (int c = 0; c < n && !third; c++) {
+                        if (c == a || c == b || !((lift >> info[idx[c]].prio) & 1))
+                            continue;
+                        if (--budget < 0) {
+                            third = 1;
+                            break;
+                        }
+                        for (int e = 0; e < nbox[c]; e++)
+                            third |= box_meets(box[c][e], ix0, iy0, ix1, iy1);
+                    }
+                    if (third)
+                        hole_add(ix0, iy0, ix1, iy1);
                 }
         }
     }
-#undef GROW
-    if (x0 >= x1 || y0 >= y1)
+    if (!nhr)
         return 0;
-    hole_on = 1;
-    hole_x0 = x0; hole_y0 = y0; hole_x1 = x1; hole_y1 = y1;
-    /* the OBJs inside, and their (priority, semi) combinations: a pixel of
-     * the composition takes both from one OBJ */
-    int nc = 0;
-    uint8_t seen = 0;
+    /* the holes, their OBJs, and per hole the (priority, semi) combinations
+     * of those: a pixel of a composition takes both from one OBJ */
+    int off = 0;
+    for (int h = 0; h < nhr; h++) {
+        hole_t *H = &holes[h];
+        H->x0 = hr[h].x0; H->y0 = hr[h].y0; H->x1 = hr[h].x1; H->y1 = hr[h].y1;
+        H->n = 0;
+        H->composed = 0;
+        int area = hr_area(&hr[h]);
+        H->comp_off = off + area <= COMP_MAX ? off : -1;
+        if (H->comp_off >= 0)
+            off += area;
+    }
+    nholes = nhr;
     cpu_n = 0;
     for (int k = 0; k < n; k++) {
-        int meets = 0;
-        for (int b = 0; b < nbox[k]; b++)
-            meets |= box_meets(box[k][b], x0, y0, x1, y1);
-        if (!meets)
+        int in = 0;
+        for (int h = 0; h < nholes; h++) {
+            hole_t *H = &holes[h];
+            int meets = 0;
+            for (int b = 0; b < nbox[k]; b++)
+                meets |= box_meets(box[k][b], H->x0, H->y0, H->x1, H->y1);
+            if (meets) {
+                H->obj[H->n++] = (uint8_t)cpu_n;
+                in = 1;
+            }
+        }
+        if (!in)
             continue;
-        const objinfo_t *o = &info[idx[k]];
         memcpy(cpu_box[cpu_n], box[k], sizeof box[k]);
         cpu_nbox[cpu_n] = nbox[k];
         cpu_list[cpu_n++] = idx[k];
-        int code = o->prio | (o->semi << 2);
-        if (!(seen & (1u << code))) {
-            seen |= (uint8_t)(1u << code);
-            codes[nc++] = (uint8_t)code;
+    }
+    int nc = 0;
+    for (int h = 0; h < nholes; h++) {
+        uint8_t seen = 0;
+        for (int k = 0; k < holes[h].n; k++) {
+            const objinfo_t *o = &info[cpu_list[holes[h].obj[k]]];
+            int code = o->prio | (o->semi << 2);
+            if (!(seen & (1u << code))) {
+                seen |= (uint8_t)(1u << code);
+                codes[nc++] = (uint8_t)(code | (h << 3));
+            }
         }
     }
     return nc;
 }
 
 void obj_cpu_end(void) {
-    hole_on = 0;
+    nholes = 0;
 }
 
-/* A pixel of item 'code' lies inside the box of an OBJ with that code (the
- * OBJ whose texel, opaque or transparent, gave the pixel its priority and
- * semi-transparency), so the item stays inside the union of those boxes. */
-int obj_cpu_box(int code, int *x0, int *y0, int *x1, int *y1) {
-    if (!hole_on)
+/* A pixel of item id (hole id >> 3, code id & 7) lies inside the hole and
+ * inside the box of an OBJ with that code (the OBJ whose texel, opaque or
+ * transparent, gave the pixel its priority and semi-transparency), so the
+ * item stays inside the union of those boxes clipped to the hole. */
+int obj_cpu_box(int id, int *x0, int *y0, int *x1, int *y1) {
+    int h = id >> 3, code = id & 7;
+    if (h >= nholes)
         return 0;
-    int a = hole_x1, b = hole_y1, c = hole_x0, d = hole_y0;
-    for (int k = 0; k < cpu_n; k++) {
-        const objinfo_t *o = &info[cpu_list[k]];
+    const hole_t *H = &holes[h];
+    int a = H->x1, b = H->y1, c = H->x0, d = H->y0;
+    for (int k = 0; k < H->n; k++) {
+        int e = H->obj[k];
+        const objinfo_t *o = &info[cpu_list[e]];
         if ((o->prio | (o->semi << 2)) != code)
             continue;
-        for (int q = 0; q < cpu_nbox[k]; q++) {
-            const int16_t *bx = cpu_box[k][q];
-            int bx0 = bx[0] > hole_x0 ? bx[0] : hole_x0, by0 = bx[1] > hole_y0 ? bx[1] : hole_y0;
-            int bx1 = bx[2] < hole_x1 ? bx[2] : hole_x1, by1 = bx[3] < hole_y1 ? bx[3] : hole_y1;
+        for (int q = 0; q < cpu_nbox[e]; q++) {
+            const int16_t *bx = cpu_box[e][q];
+            int bx0 = bx[0] > H->x0 ? bx[0] : H->x0, by0 = bx[1] > H->y0 ? bx[1] : H->y0;
+            int bx1 = bx[2] < H->x1 ? bx[2] : H->x1, by1 = bx[3] < H->y1 ? bx[3] : H->y1;
             if (bx0 < bx1 && by0 < by1)
                 grow(&a, &b, &c, &d, bx0, by0, bx1, by1);
         }
@@ -641,10 +762,10 @@ int obj_cpu_box(int code, int *x0, int *y0, int *x1, int *y1) {
     return 1;
 }
 
-/* the colour of a pixel can come from any OBJ in the hole (a transparent
+/* the colour of a pixel can come from any OBJ in a hole (a transparent
  * texel passes only priority and semi-transparency down) */
-uint32_t obj_cpu_colour_max(int code) {
-    (void)code;
+uint32_t obj_cpu_colour_max(int id) {
+    (void)id;
     if (cpu_cmax_frame != r_frame) {
         uint32_t m[3] = { 0, 0, 0 };
         for (int k = 0; k < cpu_n; k++) {
@@ -658,14 +779,14 @@ uint32_t obj_cpu_colour_max(int code) {
     return cpu_cmax;
 }
 
-/* One line of the OBJ layer inside the hole, by ppu_soft's rules (draw_objs):
- * OBJs in OAM order, an opaque texel replaces the pixel when there is none
- * or its priority is better, a transparent texel of a better priority still
- * passes its priority and semi-transparency down; mosaic, affine and the
- * bitmap-mode cut as there.  col = OBJ palette index (0: no pixel), ps =
- * prio | semi << 2. */
-static void cpu_compose_line(int line, uint8_t *col, uint8_t *ps) {
-    int sx0 = hole_x0, sx1 = hole_x1, w = sx1 - sx0;
+/* One line of the OBJ layer inside hole H, columns [sx0, sx1), by ppu_soft's
+ * rules (draw_objs): OBJs in OAM order, an opaque texel replaces the pixel
+ * when there is none or its priority is better, a transparent texel of a
+ * better priority still passes its priority and semi-transparency down;
+ * mosaic, affine and the bitmap-mode cut as there.  col = OBJ palette index
+ * (0: no pixel), ps = prio | semi << 2, both indexed from sx0. */
+static void cpu_compose_line(const hole_t *H, int line, int sx0, int sx1, uint8_t *col, uint8_t *ps) {
+    int w = sx1 - sx0;
     uint32_t mosaic = io16(REG_MOSAIC);
     int mh = (int)((mosaic >> 8) & 15) + 1, mv = (int)((mosaic >> 12) & 15) + 1;
     uint8_t pr[320];
@@ -674,8 +795,8 @@ static void cpu_compose_line(int line, uint8_t *col, uint8_t *ps) {
         pr[x] = 4;
         ps[x] = 0xFF;
     }
-    for (int k = 0; k < cpu_n; k++) {
-        const objinfo_t *o = &info[cpu_list[k]];
+    for (int e = 0; e < H->n; e++) {
+        const objinfo_t *o = &info[cpu_list[H->obj[e]]];
         int bw = o->bw, bh = o->bh, ox = o->x, oy = o->y, row;
         if (o->own_pos) {
             row = line - oy;
@@ -744,42 +865,41 @@ static void cpu_compose_line(int line, uint8_t *col, uint8_t *ps) {
     }
 }
 
-/* The composition of the whole hole, done once per frame when it fits
- * (the items of all (priority, semi) combinations read it); a larger hole
- * is composed again for each item. */
-#define COMP_MAX 16384
-static uint8_t comp_col[COMP_MAX], comp_ps[COMP_MAX];
-static uint32_t comp_frame;
-
-void obj_cpu_draw(int code, int fx) {
-    if (!hole_on)
+/* The composition of each hole, done once per frame while the holes fit
+ * (the items of all (priority, semi) combinations read it); a hole that
+ * does not fit is composed again for each item, over the draw window. */
+void obj_cpu_draw(int id, int fx) {
+    int h = id >> 3, code = id & 7;
+    if (h >= nholes)
         return;
+    hole_t *H = &holes[h];
     /* the part of the hole inside the draw window (the blend path draws an
      * item once per rectangle) */
-    int x0 = hole_x0 > R.wx0 ? hole_x0 : R.wx0, y0 = hole_y0 > R.wy0 ? hole_y0 : R.wy0;
-    int x1 = hole_x1 < R.wx1 ? hole_x1 : R.wx1, y1 = hole_y1 < R.wy1 ? hole_y1 : R.wy1;
+    int x0 = H->x0 > R.wx0 ? H->x0 : R.wx0, y0 = H->y0 > R.wy0 ? H->y0 : R.wy0;
+    int x1 = H->x1 < R.wx1 ? H->x1 : R.wx1, y1 = H->y1 < R.wy1 ? H->y1 : R.wy1;
     if (x0 >= x1 || y0 >= y1)
         return;
-    int hw = hole_x1 - hole_x0, w = x1 - x0, h = y1 - y0, pitch = (w + 7) & ~7;
-    uint8_t *buf = r_scratch((uint32_t)(pitch * h));
+    int hw = H->x1 - H->x0, w = x1 - x0, hh = y1 - y0, pitch = (w + 7) & ~7;
+    uint8_t *buf = r_scratch((uint32_t)(pitch * hh));
     if (!buf)
         return;
-    int stored = hw * (hole_y1 - hole_y0) <= COMP_MAX;
-    if (stored && comp_frame != r_frame) {
-        for (int y = 0; y < hole_y1 - hole_y0; y++)
-            cpu_compose_line(hole_y0 + y, comp_col + y * hw, comp_ps + y * hw);
-        comp_frame = r_frame;
+    int stored = H->comp_off >= 0;
+    if (stored && !H->composed) {
+        for (int y = 0; y < H->y1 - H->y0; y++)
+            cpu_compose_line(H, H->y0 + y, H->x0, H->x1, comp_col + H->comp_off + y * hw,
+                             comp_ps + H->comp_off + y * hw);
+        H->composed = 1;
     }
     static uint8_t col[320 + 8], ps[320 + 8];
-    for (int y = 0; y < h; y++) {
+    for (int y = 0; y < hh; y++) {
         const uint8_t *c, *q;
         if (stored) {
-            c = comp_col + (y0 - hole_y0 + y) * hw + (x0 - hole_x0);
-            q = comp_ps + (y0 - hole_y0 + y) * hw + (x0 - hole_x0);
+            c = comp_col + H->comp_off + (y0 - H->y0 + y) * hw + (x0 - H->x0);
+            q = comp_ps + H->comp_off + (y0 - H->y0 + y) * hw + (x0 - H->x0);
         } else {
-            cpu_compose_line(y0 + y, col, ps);
-            c = col + (x0 - hole_x0);
-            q = ps + (x0 - hole_x0);
+            cpu_compose_line(H, y0 + y, x0, x1, col, ps);
+            c = col;
+            q = ps;
         }
         uint64_t *d = (uint64_t *)(buf + y * pitch);     /* uncached: 8 pixels a store */
         for (int x = 0; x < pitch; x += 8) {
@@ -791,7 +911,69 @@ void obj_cpu_draw(int code, int fx) {
     }
     r_bind(PAL_OBJ, fx);
     r_scissor_region();
-    r_blit_image(buf, pitch, FMT_CI8, x0, y0, w, h);
+    r_blit_image(buf, pitch, FMT_CI8, x0, y0, w, hh);
+}
+
+/* The clip windows of an OBJ at (x, y), w x h: the draw window minus the
+ * holes that meet the OBJ there, cut into bands at the holes' y edges and
+ * each band into the x runs between the holes covering it (at most
+ * (2H+1)(H+1) rectangles for H holes). */
+#define MAX_CLIPS ((2 * MAX_HOLES + 1) * (MAX_HOLES + 1))
+static int obj_clips(int x, int y, int w, int h, int rc[MAX_CLIPS][4]) {
+    int hl[MAX_HOLES][4], nh = 0;
+    for (int k = 0; k < nholes; k++) {
+        const hole_t *H = &holes[k];
+        if (x >= H->x1 || x + w <= H->x0 || y >= H->y1 || y + h <= H->y0 ||
+            H->x0 >= R.wx1 || H->x1 <= R.wx0 || H->y0 >= R.wy1 || H->y1 <= R.wy0)
+            continue;
+        hl[nh][0] = H->x0; hl[nh][1] = H->y0; hl[nh][2] = H->x1; hl[nh][3] = H->y1;
+        nh++;
+    }
+    if (!nh) {
+        rc[0][0] = R.wx0; rc[0][1] = R.wy0; rc[0][2] = R.wx1; rc[0][3] = R.wy1;
+        return 1;
+    }
+    /* band edges: the window's and the holes' inside it, sorted */
+    int ys[2 * MAX_HOLES + 2], ny = 0;
+    ys[ny++] = R.wy0;
+    ys[ny++] = R.wy1;
+    for (int k = 0; k < nh; k++)
+        for (int e = 1; e <= 3; e += 2)
+            if (hl[k][e] > R.wy0 && hl[k][e] < R.wy1)
+                ys[ny++] = hl[k][e];
+    for (int a = 1; a < ny; a++)
+        for (int b = a; b > 0 && ys[b - 1] > ys[b]; b--) {
+            int t = ys[b]; ys[b] = ys[b - 1]; ys[b - 1] = t;
+        }
+    int n = 0;
+    for (int band = 0; band + 1 < ny; band++) {
+        int ya = ys[band], yb = ys[band + 1];
+        if (ya >= yb || y >= yb || y + h <= ya)
+            continue;
+        /* the holes covering this band, by x (disjoint holes covering the
+         * same rows have disjoint x ranges) */
+        int hx[MAX_HOLES][2], nx = 0;
+        for (int k = 0; k < nh; k++)
+            if (hl[k][1] <= ya && hl[k][3] >= yb) {
+                int b = nx++;
+                for (; b > 0 && hx[b - 1][0] > hl[k][0]; b--) {
+                    hx[b][0] = hx[b - 1][0]; hx[b][1] = hx[b - 1][1];
+                }
+                hx[b][0] = hl[k][0]; hx[b][1] = hl[k][2];
+            }
+        int cur = R.wx0;
+        for (int k = 0; k <= nx; k++) {
+            int xe = k < nx ? hx[k][0] : R.wx1;
+            if (xe > R.wx1) xe = R.wx1;
+            if (cur < xe && x < xe && x + w > cur) {
+                rc[n][0] = cur; rc[n][1] = ya; rc[n][2] = xe; rc[n][3] = yb;
+                n++;
+            }
+            if (k < nx && hx[k][1] > cur)
+                cur = hx[k][1];
+        }
+    }
+    return n;
 }
 
 void obj_draw(int i, int fx) {
@@ -806,24 +988,9 @@ void obj_draw(int i, int fx) {
             if (x >= R.wx1 || x + o->bw <= R.wx0 || y >= R.wy1 || y + o->bh <= R.wy0)
                 continue;                       /* outside the draw window */
             /* the clip windows: the draw window, or its parts around the
-             * CPU-composited rectangle (above, below, left, right) */
-            int rc[4][4], nrc = 0;
-            if (!hole_on || x >= hole_x1 || x + o->bw <= hole_x0 || y >= hole_y1 || y + o->bh <= hole_y0 ||
-                hole_x0 >= R.wx1 || hole_x1 <= R.wx0 || hole_y0 >= R.wy1 || hole_y1 <= R.wy0) {
-                rc[0][0] = R.wx0; rc[0][1] = R.wy0; rc[0][2] = R.wx1; rc[0][3] = R.wy1;
-                nrc = 1;
-            } else {
-                int hy0 = hole_y0 > R.wy0 ? hole_y0 : R.wy0, hy1 = hole_y1 < R.wy1 ? hole_y1 : R.wy1;
-                const int cand[4][4] = { { R.wx0, R.wy0, R.wx1, hole_y0 }, { R.wx0, hole_y1, R.wx1, R.wy1 },
-                                         { R.wx0, hy0, hole_x0, hy1 }, { hole_x1, hy0, R.wx1, hy1 } };
-                for (int k = 0; k < 4; k++) {
-                    const int *c = cand[k];
-                    if (c[0] >= c[2] || c[1] >= c[3] || x >= c[2] || x + o->bw <= c[0] ||
-                        y >= c[3] || y + o->bh <= c[1])
-                        continue;
-                    memcpy(rc[nrc++], c, sizeof rc[0]);
-                }
-            }
+             * CPU-composited holes */
+            int rc[MAX_CLIPS][4];
+            int nrc = obj_clips(x, y, o->bw, o->bh, rc);
             for (int k = 0; k < nrc; k++) {
                 r_scissor(rc[k][0], rc[k][1], rc[k][2], rc[k][3]);
                 if (o->affine && !o->ident)

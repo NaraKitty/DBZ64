@@ -148,6 +148,10 @@ check for renderer changes.
 | `synth_mosaic_obj` | OBJ mosaic: regular (flips, 4bpp/8bpp) and affine OBJs, partly off-screen |
 | `synth_mosaic_mode7` | mode 1 BG2 with per-line parameters and BG1 per-line scroll, both with mosaic |
 | `synth_mosaic_mode4`, `synth_mosaic_mode3` | bitmap modes with BG2 mosaic (scaled mode 4, mode 3 with darken) |
+| `synth_objprio` | the transparent-texel priority rule of the OBJ layer (CPU-composited), with an alpha blend |
+| `synth_mix9_7`, `synth_mix12_0` | a first target (BG0) over a 2nd target that is solid, empty or partly transparent per cell, over a BG that is not a 2nd target, OBJs between: cells blended without tags, cells where BG0 shows without its effect (plain pass), tagged cells; with EVB = 0 also faded cells next to plain ones in a band |
+| `synth_objholes` | more than four separate places that need CPU-composited OBJ pixels (priority inversions with a BG between, a semi-transparent OBJ over another, a mosaic OBJ): several holes, some merged; OBJ pairs that need none |
+| `synth_objprio_bg` | priority inversions without blending, with and without a BG priority between the two OBJs |
 | `synth_objprio` | the OBJ layer's transparent-texel priority rule: worse-priority OBJs under later better-priority ones, semi-transparent and affine ones, with alpha blending |
 
 The renderer composites the OBJ pixels of a rectangle on the CPU where

@@ -22,10 +22,12 @@
  *         (unflipped sprites with a negative S step: COPY mode cannot flip
  *         horizontally); affine OBJs are rasterised on the CPU.
  *       - where one OBJ at a time is not the GBA's OBJ layer, the OBJ pixels
- *         of a rectangle are composited on the CPU with ppu_soft's rules and
- *         drawn per priority (render_obj.c, obj_cpu_begin): a later OBJ with
- *         a better priority over an earlier one (its transparent texels
- *         still pass their priority down), OBJ mosaic, and with alpha
+ *         of up to 4 rectangles ("holes") are composited on the CPU with
+ *         ppu_soft's rules and drawn per priority (render_obj.c,
+ *         obj_cpu_begin): a later OBJ with a better priority over an earlier
+ *         one where a displayed BG or a third OBJ has a priority between
+ *         theirs (its transparent texels still pass their priority down),
+ *         OBJ mosaic, and with alpha
  *         blending an OBJ that blends over another OBJ (the GBA blends the
  *         OBJ layer's top pixel with the BG beneath).
  *       - BG mosaic: text BGs with mosaic are rasterised on the CPU, affine
@@ -55,18 +57,22 @@
  *         DECAL depth test (blended over tagged 2nd targets, plain elsewhere).
  *       The 32-bit path is slow on hardware (docs/RDP_COST.md), so it only
  *       covers rectangles of 8x8 cells of the region: cells where a first
- *       target (or semi-transparent OBJ) may have an opaque pixel, from the
- *       layer cache's per-tile flags (all cells of a BG with mosaic) and OBJ
- *       boxes (for the CPU-composited OBJ pixels of one priority/semi code,
- *       the boxes of its OBJs inside the composed rectangle), and with
- *       EVB = 0 only the cells that need tags.  Every item is clipped to the
- *       draw window of the pass and rectangle being drawn (the composed
- *       rectangle's hole in the other OBJs as well).  Tags are written only
- *       in the cells where, walking the layers bottom-up, a pixel under a
- *       first target may not be a 2nd target (a tile without transparent pixels covers what is under
- *       it).  Everything else (and every layer above the last first target,
+ *       target (or semi-transparent OBJ) may have an opaque pixel over a
+ *       2nd target, from the layer cache's per-tile flags (all cells of a BG
+ *       with mosaic) and OBJ boxes (for the CPU-composited OBJ pixels of one
+ *       hole and priority/semi code, the boxes of its OBJs inside the hole),
+ *       and with EVB = 0 only the cells that need tags.  Every item is
+ *       clipped to the draw window of the pass and rectangle being drawn
+ *       (the composed holes in the other OBJs as well).  Walking the layers
+ *       bottom-up (a tile without transparent pixels covers what is under
+ *       it), tags are written only in the cells where a pixel under a first
+ *       target may not be a 2nd target, and a cell where no pixel under any
+ *       first target can be a 2nd target needs no 32-bit work at all.
+ *       Everything else (and every layer above the last first target,
  *       after the final pass) is drawn straight into the display with the
- *       normal COPY / 1-cycle path; the first targets have no pixel there.
+ *       normal COPY / 1-cycle path: a first target there has no pixel, or
+ *       only non-targets under it and is drawn without its effect (with
+ *       EVB = 0, faded where only 2nd targets lie under it).
  *       The game sets BLDCNT for an empty BG0 in its field maps and during
  *       dialogues, so most "blend" frames end up with no 32-bit work at all.
  *       Approximations (measured by tests/n64_render):
@@ -427,7 +433,7 @@ static void draw_item(int kind, int id, int fx, int mode, uint32_t dispcnt) {
 
 /* draw-list items that are OBJ pixels, and of those the semi-transparent
  * ones (kind 3: one OBJ, kind 4: the CPU-composited OBJ pixels of one
- * priority | semi << 2) */
+ * hole and priority, id = priority | semi << 2 | hole << 3) */
 static inline int item_is_obj(int kind) {
     return kind >= 3;
 }
@@ -668,10 +674,10 @@ static void fin_prepare(const blend_cfg_t *b, int eva, int evb) {
 
 /* ------------------------------------------------------------ frame state */
 
-/* kind: 0..2 BG kind-1, 3 OBJ, 4 the CPU-composited OBJ pixels of one code
- * (priority | semi << 2, render_obj.c obj_cpu_begin) */
+/* kind: 0..2 BG kind-1, 3 OBJ, 4 the CPU-composited OBJ pixels of one hole
+ * and code (priority | semi << 2 | hole << 3, render_obj.c obj_cpu_begin) */
 typedef struct { uint8_t kind, id, fx, l2; } item_t;
-#define MAX_ITEMS (4 + 8 + 128)
+#define MAX_ITEMS (4 + OBJ_CPU_MAX_ITEMS + 128)
 static item_t items[MAX_ITEMS];         /* draw list in painter's order */
 static int nitems, last_alpha, defer;
 static int n32;                         /* items drawn by the 32-bit path: the rest is above every
@@ -705,10 +711,13 @@ static inline uint64_t item_row(int k, int j) {
 /* Cell masks of the frame (masks_ok): reg = cells where a first target may
  * have an opaque pixel; tg = cells of reg where a pixel under a first target
  * may belong to a layer that is not a 2nd target (or to the backdrop), i.e.
- * where the 2nd-target rule needs tags.  Walking the items bottom-up, s is
- * "every pixel's top layer is a 2nd target" per cell, from the cells each
- * layer may touch and the cells it covers entirely (text BG tiles without a
- * transparent pixel). */
+ * where the 2nd-target rule needs tags; need = cells of reg where a pixel
+ * under a first target may belong to a 2nd target (outside it every first
+ * target there lies over non-targets only and shows without its effect).
+ * Walking the items bottom-up, s is "every pixel's top layer is a 2nd
+ * target" and nt "no pixel's top layer is a 2nd target" per cell, from the
+ * cells each layer may touch and the cells it covers entirely (text BG
+ * tiles without a transparent pixel). */
 /* the cells item k may cover (item_box, bg_touch) and, for text BGs, the
  * cells it covers entirely (bg_solid) */
 static void item_masks(int k, int *nbg) {
@@ -748,15 +757,15 @@ static void item_masks(int k, int *nbg) {
     }
 }
 
-static void compute_masks(uint32_t l2, cmask_t *reg, cmask_t *tg) {
+static void compute_masks(uint32_t l2, cmask_t *reg, cmask_t *tg, cmask_t *need) {
     uint64_t full = (1ull << cm_w) - 1;
-    cmask_t s, seen;
+    cmask_t s, nt, seen;
     int nbg = 0;
     fr_nalpha = 0;
     fr_asolid = NULL;
     /* the first targets first: without a cell of theirs nothing else is needed */
     uint64_t any = 0;
-    for (int j = 0; j < cm_h; j++) reg->r[j] = tg->r[j] = 0;
+    for (int j = 0; j < cm_h; j++) reg->r[j] = tg->r[j] = need->r[j] = 0;
     for (int k = 0; k < nitems; k++) {
         if (items[k].fx != FX_ALPHA) continue;
         item_masks(k, &nbg);
@@ -774,6 +783,7 @@ static void compute_masks(uint32_t l2, cmask_t *reg, cmask_t *tg) {
     for (int j = 0; j < cm_h; j++) {
         seen.r[j] = fr_cov.r[j] = 0;
         s.r[j] = ((l2 >> 5) & 1) ? full : 0;
+        nt.r[j] = ((l2 >> 5) & 1) ? 0 : full;
     }
     for (int k = 0; k < nitems; k++) {
         const item_t *it = &items[k];
@@ -785,10 +795,17 @@ static void compute_masks(uint32_t l2, cmask_t *reg, cmask_t *tg) {
             uint64_t tj = item_row(k, j), sj = so ? so->r[j] : 0;
             if (alpha) {
                 tg->r[j] |= tj & ~s.r[j];
+                need->r[j] |= tj & ~nt.r[j];
                 seen.r[j] |= tj;
             }
             fr_cov.r[j] |= sj & ~seen.r[j];
-            if (it->l2) s.r[j] |= sj; else s.r[j] &= ~tj;
+            if (it->l2) {
+                s.r[j] |= sj;
+                nt.r[j] &= ~tj;
+            } else {
+                s.r[j] &= ~tj;
+                nt.r[j] |= sj;
+            }
         }
     }
 }
@@ -878,6 +895,46 @@ static void draw_rects(int k, int fx, const rrect_t *rl, int nr) {
         set_window(x0, y0, x1, y1);
         draw_item(it->kind, it->id, fx, fr_mode, fr_dispcnt);
     }
+}
+
+/* Plain pass, a first target in the cell rows [j0, j1) outside 'cover' where
+ * both kinds of its cells occur: drawn with fxp where no 2nd target can lie
+ * under it (not in 'need') and with fxf (the EVB = 0 fade) elsewhere, one
+ * draw window per rectangle (a rectangle of one kind never covers a cell of
+ * the other; cells of 'cover' are redrawn by the final pass anyway). */
+static void draw_cells(const item_t *it, int fx, const rrect_t *rl, int n) {
+    for (int q = 0; q < n; q++) {
+        int x0, y0, x1, y1;
+        rect_px(&rl[q], &x0, &y0, &x1, &y1);
+        set_window(x0, y0, x1, y1);
+        draw_item(it->kind, it->id, fx, fr_mode, fr_dispcnt);
+    }
+}
+
+static void draw_split(int k, const cmask_t *cover, const cmask_t *need, int j0, int j1, int fxp, int fxf) {
+    const item_t *it = &items[k];
+    static cmask_t m[2], one;
+    static rrect_t rl[MAX_RECTS];
+    for (int j = 0; j < cm_h; j++) {
+        uint64_t o = j >= j0 && j < j1 ? item_row(k, j) & ~cover->r[j] : 0;
+        m[0].r[j] = o & ~need->r[j];
+        m[1].r[j] = o & need->r[j];
+    }
+    for (int s = 0; s < 2; s++) {
+        int fx = s ? fxf : fxp;
+        int n = mask_rects(&m[s], &m[s ^ 1], rl, MAX_RECTS);
+        if (n >= 0) {
+            draw_cells(it, fx, rl, n);
+            continue;
+        }
+        /* too fragmented: one cell row at a time (at most 32 runs each) */
+        for (int j = j0; j < j1; j++) {
+            for (int q = 0; q < cm_h; q++) one.r[q] = q == j ? m[s].r[q] : 0;
+            n = mask_rects(&one, &m[s ^ 1], rl, MAX_RECTS);
+            if (n > 0) draw_cells(it, fx, rl, n);
+        }
+    }
+    set_window(R.gx0, R.gy0 + 8 * j0, R.gx1, R.gy0 + 8 * j1);
 }
 
 static inline color_t c4(uint32_t c) {
@@ -1121,8 +1178,16 @@ void gba_render_frame(surface_t *disp, const gba_view_t *view) {
     /* ---- OBJ list ---- */
     uint8_t olist[4][128];
     int ocount[4] = { 0, 0, 0, 0 };
-    uint8_t ocodes[8];
+    uint8_t ocodes[OBJ_CPU_MAX_ITEMS];
     int ncodes = 0;
+    /* BG priorities, and the set of them among the displayed BGs */
+    int bgprio[4];
+    uint32_t bgpm = 0;
+    for (int n = 0; n < 4; n++) {
+        bgprio[n] = (int)(io16(REG_BG0CNT + 2 * n) & 3);
+        if (bg_kind[mode][n] && (dispcnt & (0x100u << n)))
+            bgpm |= 1u << bgprio[n];
+    }
     if (dispcnt & 0x1000) {
         uint64_t tp = get_ticks();
         obj_parse(dispcnt, olist, ocount);
@@ -1131,7 +1196,7 @@ void gba_render_frame(surface_t *disp, const gba_view_t *view) {
          * a BG, never another OBJ */
         ncodes = obj_cpu_begin(olist, ocount,
                                lfx[4] == FX_ALPHA ? OBJ_CPU_BLEND_ALL :
-                               semi_fx == FX_ALPHA ? OBJ_CPU_BLEND_SEMI : OBJ_CPU_BLEND_NONE, ocodes);
+                               semi_fx == FX_ALPHA ? OBJ_CPU_BLEND_SEMI : OBJ_CPU_BLEND_NONE, bgpm, ocodes);
         uint64_t tc = get_ticks();
         r_stats.us_obj_parse = (uint32_t)TICKS_TO_US(tc - tp);
         obj_prepare(olist, ocount);             /* OBJ shadow: part of us_track */
@@ -1141,9 +1206,6 @@ void gba_render_frame(surface_t *disp, const gba_view_t *view) {
     /* ---- draw list in painter's order: priority 3..0, BGs (3..0), then the
      * CPU-composited OBJ pixels of that priority, then OBJs (127..0) ---- */
     nitems = 0;
-    int bgprio[4];
-    for (int n = 0; n < 4; n++)
-        bgprio[n] = (int)(io16(REG_BG0CNT + 2 * n) & 3);
     for (int p = 3; p >= 0; p--) {
         for (int n = 3; n >= 0; n--) {
             if (!bg_kind[mode][n] || !(dispcnt & (0x100u << n)) || bgprio[n] != p) continue;
@@ -1216,42 +1278,60 @@ void gba_render_frame(surface_t *disp, const gba_view_t *view) {
 
     /* ---- where the 32-bit path is needed ----
      * Only cells where a first target (or semi-transparent OBJ) may have an
-     * opaque pixel go through it (with EVB = 0 only the cells that need
-     * tags: elsewhere the plain pass applies the fade); everything else is
-     * drawn by the plain pass straight into the display, where the first
-     * targets are left out (they have no pixel there).  Tags are written only
-     * in the cells where a layer that is not a 2nd target may lie under a
-     * first target. */
+     * opaque pixel over a 2nd target go through it (with EVB = 0 only the
+     * cells that need tags: elsewhere the plain pass applies the fade);
+     * everything else is drawn by the plain pass straight into the display,
+     * where a first target is drawn without its effect in the cells where
+     * only non-targets can lie under it (and has no pixel elsewhere).  Tags
+     * are written only in the cells where a layer that is not a 2nd target
+     * may lie under a first target. */
     static rrect_t rl_n[MAX_RECTS], rl_t[MAX_RECTS], rl_all[2 * MAX_RECTS];
-    int nrn = 0, nrt = 0, skip_alpha = 0;
-    cmask_t reg;
+    int nrn = 0, nrt = 0, skip_alpha = 0, amask = 0;
+    /* reg: cells of the 32-bit path; need: cells where a first target may be
+     * drawn with its effect (amask: the masks were computed) */
+    cmask_t reg, need;
     uint64_t full_row = cm_w >= 64 ? ~0ull : (1ull << cm_w) - 1;
     if (blend32) {
         uint64_t tm = get_ticks();
         skip_alpha = alpha_needs_blend;
         if (masks_ok) {
-            cmask_t T;
-            compute_masks(l2, &reg, &T);
-            if (!alpha_needs_blend || defer) {
-                /* EVB = 0: the plain pass does the fade, the 32-bit path only
-                 * the tagged cells; deferred brighten: all of it tagged */
-                if (defer) T = reg; else reg = T;
+            cmask_t T, apass;
+            compute_masks(l2, &reg, &T, &need);
+            amask = 1;
+            for (int j = 0; j < cm_h; j++) {
+                uint64_t a = reg.r[j];
+                if (defer) {
+                    /* deferred brighten: all of it tagged */
+                    T.r[j] = need.r[j] = a;
+                } else if (!alpha_needs_blend) {
+                    /* EVB = 0: the plain pass does the fade (or no effect),
+                     * the 32-bit path only the cells where both can occur */
+                    reg.r[j] = T.r[j] = T.r[j] & need.r[j];
+                } else {
+                    reg.r[j] = need.r[j];
+                    T.r[j] &= need.r[j];
+                }
+                /* first-target cells left to the plain pass: an untagged
+                 * 32-bit rectangle must not cover them (it would apply the
+                 * effect over a non-target) */
+                apass.r[j] = a & ~reg.r[j];
             }
-            cmask_t mn, mt;
+            cmask_t mn, mt, av0;
             for (int j = 0; j < cm_h; j++) {
                 mt.r[j] = reg.r[j] & T.r[j];
                 mn.r[j] = reg.r[j] & ~T.r[j];
+                av0.r[j] = mt.r[j] | apass.r[j];
             }
             /* the two sets of rectangles never overlap (a cell drawn by both
              * passes would be blended twice) */
-            nrn = mask_rects(&mn, &mt, rl_n, MAX_RECTS);
+            nrn = mask_rects(&mn, &av0, rl_n, MAX_RECTS);
             nrt = nrn < 0 ? -1 : mask_rects(&mt, &mn, rl_t, MAX_RECTS);
             if (nrt >= 0 && nrt <= 4 && nrn > 8) {
                 /* many tagless rectangles (every rectangle costs a draw of
                  * each item it meets): one per band of 4 cell rows where its
                  * box meets no tagged rectangle, the exact ones elsewhere */
                 cmask_t av, band;
-                for (int j = 0; j < cm_h; j++) av.r[j] = 0;
+                for (int j = 0; j < cm_h; j++) av.r[j] = apass.r[j];
                 for (int q = 0; q < nrt; q++)
                     for (int j = rl_t[q].j0; j < rl_t[q].j1; j++) av.r[j] |= rect_bits(&rl_t[q]);
                 nrn = 0;
@@ -1279,6 +1359,19 @@ void gba_render_frame(surface_t *disp, const gba_view_t *view) {
                 for (int j = 0; j < cm_h; j++)
                     if (mt.r[j]) { mt.r[j] = reg.r[j]; mn.r[j] = 0; }
                 nrn = band_rects(&mn, &mt, rl_n);
+                /* an untagged rectangle over a cell left to the plain pass:
+                 * its rows are tagged too (the other untagged rectangles of
+                 * the band stay as they are: they end at tagged rows) */
+                int moved = 0;
+                for (int q = 0; q < nrn; q++) {
+                    uint64_t b = rect_bits(&rl_n[q]), hit = 0;
+                    for (int j = rl_n[q].j0; j < rl_n[q].j1; j++) hit |= apass.r[j] & b;
+                    if (!hit) continue;
+                    for (int j = rl_n[q].j0; j < rl_n[q].j1; j++)
+                        if (mn.r[j]) { mt.r[j] = reg.r[j]; mn.r[j] = 0; }
+                    moved = 1;
+                }
+                if (moved) nrn = band_rects(&mn, &mt, rl_n);
                 nrt = band_rects(&mt, &mn, rl_t);
             }
 
@@ -1295,7 +1388,7 @@ void gba_render_frame(surface_t *disp, const gba_view_t *view) {
     tags = nrt > 0;
     /* cells the 32-bit path draws: the plain pass leaves out items entirely inside them */
     cmask_t cover;
-    if (blend32 && masks_ok) {
+    if (amask) {
         for (int j = 0; j < cm_h; j++) cover.r[j] = 0;
         for (int q = 0; q < nrn; q++)
             for (int j = rl_n[q].j0; j < rl_n[q].j1; j++) cover.r[j] |= rect_bits(&rl_n[q]);
@@ -1359,15 +1452,35 @@ void gba_render_frame(surface_t *disp, const gba_view_t *view) {
         fill_g(R.wx0, R.wy0, R.wx1, R.wy1);
         for (int k = 0; k < nitems; k++) {
             const item_t *it = &items[k];
-            if (skip_alpha && it->fx == FX_ALPHA) continue;
             if (blend32 && k >= n32) continue;  /* drawn once over everything at the end */
-            if (blend32 && masks_ok) {
-                uint64_t out = 0;
-                for (int q = j; q < j1; q++) out |= item_row(k, q) & ~cover.r[q];
-                if (!out) continue;             /* drawn by the 32-bit path (or after it) */
+            int fx = it->fx, split = 0;
+            if (fx == FX_ALPHA && amask) {
+                /* a first target outside the 32-bit path: without its effect
+                 * where no 2nd target can lie under it, else (EVB = 0) faded */
+                uint64_t pm = 0, fm = 0;
+                for (int q = j; q < j1; q++) {
+                    uint64_t o = item_row(k, q) & ~cover.r[q];
+                    pm |= o & ~need.r[q];
+                    fm |= o & need.r[q];
+                }
+                if (!pm && !fm) continue;       /* drawn by the 32-bit path */
+                if (pm) {
+                    split = fm != 0;
+                    fx = item_obj_semi(it->kind, it->id) && fr_obj_bright ? FX_BRIGHT : FX_PLAIN;
+                }
+            } else {
+                if (skip_alpha && fx == FX_ALPHA) continue;
+                if (blend32 && masks_ok) {
+                    uint64_t out = 0;
+                    for (int q = j; q < j1; q++) out |= item_row(k, q) & ~cover.r[q];
+                    if (!out) continue;         /* drawn by the 32-bit path (or after it) */
+                }
             }
             uint64_t ta = get_ticks();
-            draw_item(it->kind, it->id, it->fx, mode, dispcnt);
+            if (split)
+                draw_split(k, &cover, &need, j, j1, fx, it->fx);
+            else
+                draw_item(it->kind, it->id, fx, mode, dispcnt);
             if (item_is_obj(it->kind)) t_obj += get_ticks() - ta; else t_bg += get_ticks() - ta;
         }
         j = j1;

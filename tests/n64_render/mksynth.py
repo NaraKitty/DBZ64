@@ -757,6 +757,110 @@ def st_objprio():
     return s
 
 
+def bg_mixed(s, bg, prio, sb, cb):
+    """8bpp text BG whose cells are empty, solid (no transparent pixel) or
+    partly transparent, in 4x4-cell blocks"""
+    tiles8(s, cb * 0x4000, 1, transp=1.0)                 # tile 0: empty
+    tiles8(s, cb * 0x4000 + 64, 16, transp=0.0)           # 1..16: solid
+    tiles8(s, cb * 0x4000 + 17 * 64, 16, transp=0.4)      # 17..32: partly transparent
+    for o in range(0x400):
+        x, y = o & 31, o >> 5
+        kind = ((x >> 2) + (y >> 2) * 3) % 3
+        e = 0 if kind == 0 else (1 + R.randrange(16) if kind == 1 else 17 + R.randrange(16))
+        s.v16(sb * 0x800 + o * 2, e | (R.randrange(4) << 10))
+    s.r(0x08 + 2 * bg, 0x80 | (cb << 2) | (sb << 8) | prio)
+
+
+def st_mix(eva, evb):
+    """A first target (BG0) over a 2nd target (BG1) that is solid in some
+    cells, empty in others and partly transparent in the rest, over BG3,
+    which is not a 2nd target, with OBJs (2nd targets) between BG1 and BG0
+    and above BG0: cells where only 2nd targets lie under BG0 (no tags),
+    only non-targets (no effect at all) and both (tags)."""
+    s = St()
+    rnd_pal(s)
+    background(s, bg=3, prio=3, sb=31)
+    bg_mixed(s, 1, 2, 30, 1)
+    tiles8(s, 0x8000, 1, transp=1.0)
+    tiles8(s, 0x8000 + 64, 32, transp=0.3)
+    for o in range(0x400):
+        x, y = o & 31, o >> 5
+        filled = 3 <= y < 15 or (x * 5 + y * 3) % 7 == 0
+        s.v16(29 * 0x800 + o * 2, (1 + R.randrange(32)) if filled else 0)
+    s.r(0x08, 0x80 | (2 << 2) | (29 << 8) | 1)
+    obj_vram_random(s, transp=0.4)
+    for k in range(10):
+        x, y = 6 + k * 23, 20 + (k % 4) * 30
+        s.obj(k, y | 0x2000, x | (2 << 14), (k * 32) & 0x3FF | (2 << 10))          # under BG0
+    for k in range(4):
+        x, y = 30 + k * 50, 60 + (k % 2) * 40
+        s.obj(10 + k, y | 0x2000 | (0x400 if k % 2 else 0), x | (1 << 14),         # above BG0
+              (512 + k * 16) & 0x3FF | (0 << 10))
+    s.r(0x50, 0x1241)                            # alpha: 1st BG0, 2nd BG1 + OBJ
+    s.r(0x52, eva | (evb << 8))
+    s.r(0x00, 0x1B40)
+    return s
+
+
+def st_objholes():
+    """Several places far apart where one OBJ at a time is not the GBA's OBJ
+    layer (priority inversions with a BG priority between, semi-transparent
+    OBJs over others under an alpha blend, a mosaic OBJ): more than 4, so
+    that some of them share a composed rectangle; and OBJ pairs with no BG
+    priority between them, which need none."""
+    s = St()
+    rnd_pal(s)
+    background(s, bg=3, prio=3, sb=31)
+    tiles8(s, 64 * 64, 64, transp=0.5)
+    for o in range(0x400):
+        s.v16(30 * 0x800 + o * 2, 64 + R.randrange(64))
+    s.r(0x0A, 0x80 | (30 << 8) | 1)              # BG1 partly transparent, prio 1
+    obj_vram_random(s, transp=0.5)
+    i = 0
+    # earlier 32x32 priority 3, later 16x16 priority 0 over it (BG1 between)
+    for (x, y) in ((4, 4), (196, 6), (6, 120), (200, 122), (104, 64), (60, 130)):
+        s.obj(i, y | 0x2000, x | (2 << 14), (i * 32) & 0x3FF | (3 << 10)); i += 1
+        s.obj(i, (y + 9) | 0x2000, (x + 7) | (1 << 14), (i * 32 + 256) & 0x3FF | (0 << 10)); i += 1
+    # a semi-transparent OBJ over another (blends with the BG beneath)
+    s.obj(i, 40 | 0x2000 | 0x400, 150 | (2 << 14), 700 | (2 << 10)); i += 1
+    s.obj(i, 50 | 0x2000, 160 | (2 << 14), 740 | (2 << 10)); i += 1
+    # a mosaic OBJ alone
+    s.obj(i, 90 | 0x2000 | 0x1000, 20 | (2 << 14), 780 | (2 << 10)); i += 1
+    # pairs with no BG priority between theirs: 3 then 2, 1 then 0 (no hole)
+    s.obj(i, 96 | 0x2000, 150 | (2 << 14), 820 | (3 << 10)); i += 1
+    s.obj(i, 104 | 0x2000, 160 | (1 << 14), 860 | (2 << 10)); i += 1
+    s.obj(i, 20 | 0x2000, 100 | (2 << 14), 900 | (1 << 10)); i += 1
+    s.obj(i, 28 | 0x2000, 108 | (1 << 14), 940 | (0 << 10)); i += 1
+    s.r(0x4C, (1 << 8) | (2 << 12))              # OBJ mosaic 2x3
+    s.r(0x50, 0x0A40)                            # alpha (semi OBJs), 2nd BG1 BG3
+    s.r(0x52, 10 | (6 << 8))
+    s.r(0x00, 0x1A40)
+    return s
+
+
+def st_objprio_bg():
+    """Priority inversions without blending: earlier OBJs with a worse
+    priority under later ones, with a displayed BG priority between the two
+    (the transparent-texel rule shows) and without one (painter's order is
+    already right)."""
+    s = St()
+    rnd_pal(s)
+    background(s, bg=3, prio=3, sb=31)
+    tiles8(s, 64 * 64, 64, transp=0.5)
+    for o in range(0x400):
+        s.v16(30 * 0x800 + o * 2, 64 + R.randrange(64))
+    s.r(0x0C, 0x80 | (30 << 8) | 2)              # BG2 partly transparent, prio 2
+    obj_vram_random(s, transp=0.5)
+    i = 0
+    for k, (pa, pb) in enumerate(((3, 1), (3, 0), (1, 0), (2, 1), (3, 2), (2, 0))):
+        x, y = 8 + k * 38, 20 + (k % 2) * 60
+        s.obj(i, y | 0x2000, x | (2 << 14), (k * 64) & 0x3FF | (pa << 10)); i += 1
+        s.obj(i, (y + 6) | 0x2000 | (0x400 if k == 4 else 0), (x + 6) | (1 << 14),
+              (k * 64 + 512) & 0x3FF | (pb << 10)); i += 1
+    s.r(0x00, 0x1C40)
+    return s
+
+
 def main():
     out = sys.argv[1]
     os.makedirs(out, exist_ok=True)
@@ -802,6 +906,10 @@ def main():
         'synth_mosaic_mode4': st_mosaic_mode4(),
         'synth_mosaic_mode3': st_mosaic_mode3(),
         'synth_objprio': st_objprio(),
+        'synth_mix9_7': st_mix(9, 7),
+        'synth_mix12_0': st_mix(12, 0),
+        'synth_objholes': st_objholes(),
+        'synth_objprio_bg': st_objprio_bg(),
     }
     for name, s in states.items():
         s.save(os.path.join(out, name + '.bin'))

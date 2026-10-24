@@ -211,24 +211,29 @@ int obj_box(int i, int *x0, int *y0, int *x1, int *y1);
 uint32_t obj_colour_max(int i);
 /* The OBJ layer composited on the CPU (render_obj.c).  Painter's order is
  * not the GBA's OBJ layer where an OBJ with a better priority follows an
- * earlier one in OAM order (its transparent texels still pass their
- * priority down, see ppu_soft), where an OBJ uses mosaic, and, with alpha
- * blending, where an OBJ that blends (semi-transparent; with
- * OBJ_CPU_BLEND_ALL every OBJ, the OBJ layer being a first target) covers
- * another OBJ: the GBA blends the OBJ layer's top pixel with the BG
- * beneath, not with the OBJ beneath.  obj_cpu_begin finds the rectangle
- * covering those places; inside it every OBJ pixel comes from a CPU
- * composition (ppu_soft's rules), drawn per (priority, semi) as obj_cpu_draw
- * items, and obj_draw leaves the rectangle out.  Returns the number of
- * items, each a (prio | semi << 2) code in codes[]. */
+ * earlier one in OAM order and a displayed BG, or a third OBJ over them,
+ * has a priority between theirs (its transparent texels still pass their
+ * priority down, see ppu_soft; bgpm = bit p set for each displayed BG of
+ * priority p), where an OBJ uses
+ * mosaic, and, with alpha blending, where an OBJ that blends
+ * (semi-transparent; with OBJ_CPU_BLEND_ALL every OBJ, the OBJ layer being a
+ * first target) covers another OBJ: the GBA blends the OBJ layer's top
+ * pixel with the BG beneath, not with the OBJ beneath.  obj_cpu_begin
+ * gathers those places into up to 4 disjoint rectangles ("holes"); inside
+ * them every OBJ pixel comes from a CPU composition (ppu_soft's rules),
+ * drawn per hole and (priority, semi) as obj_cpu_draw items, and obj_draw
+ * leaves the holes out.  Returns the number of items, each an id
+ * prio | semi << 2 | hole << 3 in codes[]. */
 enum { OBJ_CPU_BLEND_NONE, OBJ_CPU_BLEND_SEMI, OBJ_CPU_BLEND_ALL };
-int obj_cpu_begin(uint8_t lists[4][128], const int counts[4], int blend, uint8_t codes[8]);
-void obj_cpu_draw(int code, int fx);
+#define OBJ_CPU_MAX_ITEMS 32            /* 4 holes x 8 (priority, semi) codes */
+int obj_cpu_begin(uint8_t lists[4][128], const int counts[4], int blend, uint32_t bgpm,
+                  uint8_t codes[OBJ_CPU_MAX_ITEMS]);
+void obj_cpu_draw(int id, int fx);
 void obj_cpu_end(void);
-/* the cells a CPU-composited item may cover (the composed rectangle and the
- * boxes of the OBJs with that code; GBA coordinates, end exclusive) and the
- * largest channel values (BGR555) of the colours it may show; 0 if none */
-int obj_cpu_box(int code, int *x0, int *y0, int *x1, int *y1);
-uint32_t obj_cpu_colour_max(int code);
+/* the cells a CPU-composited item may cover (its hole and the boxes of the
+ * OBJs with its code; GBA coordinates, end exclusive) and the largest
+ * channel values (BGR555) of the colours it may show; 0 if none */
+int obj_cpu_box(int id, int *x0, int *y0, int *x1, int *y1);
+uint32_t obj_cpu_colour_max(int id);
 
 #endif
