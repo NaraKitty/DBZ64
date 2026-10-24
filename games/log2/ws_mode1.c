@@ -356,12 +356,13 @@ static void setup_hud(int bg) {
     last_key = key;
     last_bg = bg;
     last_hud = -1;
+    uint32_t hsh = 0;
     hud_bg = -1;
     mm_on = 0;
     mm_cx1 = -1;
     band_rows = 0;
     if (io16(REG_BG0HOFS + 4 * bg) || io16(REG_BG0HOFS + 4 * bg + 2) || (io16(REG_BG0CNT + 2 * bg) & 0xC000))
-        return;
+        goto done;
     uint8_t opaque[20][30];
     int found_blank = 0;
     for (int cy = 0; cy < 20; cy++) {
@@ -380,11 +381,10 @@ static void setup_hud(int bg) {
             band_rows |= 1u << cy;
     }
     if (!found_blank)
-        return;                         /* nothing to blank the margins with */
+        goto done;                      /* nothing to blank the margins with */
     hud_bg = last_hud = bg;
     /* the minimap: the non-blank cells outside the bands, in the top rows */
     int x0 = 99, y0 = 99, x1 = -1, y1 = -1;
-    uint32_t hsh = 0;
     for (int cy = 0; cy < 10; cy++) {
         if ((band_rows >> cy) & 1)
             continue;
@@ -395,11 +395,11 @@ static void setup_hud(int bg) {
             }
     }
     if (x1 < 0)
-        return;
+        goto done;
     /* the box must not reach a band row (it would leave holes in it) */
     for (int cy = y0; cy <= y1; cy++)
         if ((band_rows >> cy) & 1)
-            return;
+            goto done;
     for (int cy = y0; cy <= y1; cy++)
         for (int cx = x0; cx <= x1; cx++)
             hsh = hsh * 31u + hw_entry(bg, cx, cy);
@@ -410,10 +410,23 @@ static void setup_hud(int bg) {
     mm_dy = (fy + OYV) >> 3;
     mm_on = 1;
     mm_cx0 = x0; mm_cy0 = y0; mm_cx1 = x1; mm_cy1 = y1;
-    hsh ^= (uint32_t)(x0 | (y0 << 8) | (x1 << 16) | (y1 << 24));
-    if (hsh != mm_hash) {
-        mm_hash = hsh;
-        generation++;                   /* the moved cells' contents changed */
+done:;
+    /* everything the BG0 hook answers from: when any of it changes (the
+     * minimap appearing, moving or going away, the bands), renderers that
+     * cache margin cells must drop them */
+    uint32_t sig = (uint32_t)(hud_bg + 1) * 0x9E3779B1u ^ (uint32_t)mm_on ^ (band_rows << 1);
+    sig = sig * 31u + blank_entry;
+    if (mm_on) {
+        sig = sig * 31u + (uint32_t)(mm_cx0 | (mm_cy0 << 8) | (mm_cx1 << 16) | (mm_cy1 << 24));
+        sig = sig * 31u + (uint32_t)((mm_dx & 0xFFFF) | (mm_dy << 16));
+        sig = sig * 31u + hsh;
+    }
+    for (int cy = 0; cy < 20; cy++)
+        if ((band_rows >> cy) & 1)
+            sig = sig * 31u + hw_entry(bg, 0, cy) * 7u + hw_entry(bg, 29, cy);
+    if (sig != mm_hash) {
+        mm_hash = sig;
+        generation++;
     }
 }
 

@@ -469,6 +469,11 @@ static void rescan_tiles(int cx0, int cy0, int cx1, int cy1, const uint8_t tbits
 
 /* make sure every cell covering world rect [X0,X1) x [Y0,Y1) is in the ring */
 static void update_layer(int n, uint32_t cnt, int X0, int X1, int Y0, int Y1, int incremental) {
+    /* rings 2/3 are rings again: every ring writer passes here (the blend
+     * masks and colour ranges as well as the draws), so the affine texture
+     * gives the memory back first */
+    if (n >= 2)
+        atex_drop(1);
     L.n = n;
     L.cb = ((cnt >> 2) & 3) * 0x4000u;
     L.sb = ((cnt >> 8) & 31) * 0x800u;
@@ -864,14 +869,17 @@ void bg_text_cells(int n, cmask_t *touch, cmask_t *solid) {
  * unused as rings while BG2 is affine and BG3 is not a text BG), through its
  * cached alias.  The texture follows VRAM through the BG chunk tracking: it
  * references the map and the 256 tiles of its char base, and every frame
- * re-resolves the cells whose map entry chunk or tile data changed.  Before
- * the rings are used again (a text BG2/BG3, bg_invalidate) the cached lines
- * are discarded, so they can never be written back over ring data. */
+ * re-resolves the cells whose map entry chunk or tile data changed (after
+ * frames where it was not drawn, every cell whose chunks changed since).
+ * Before the rings are used again (update_layer of a text BG2/BG3,
+ * bg_invalidate) the cached lines are discarded, so they can never be
+ * written back over ring data. */
 #define AFF_ROW_MAX 640                 /* widest line rasterised from the texture */
 static int atex_bg = -1;                /* BG holding the texture, -1 none */
 static uint32_t atex_key;               /* BGxCNT: char base, screen base, size */
 static int atex_bits;                   /* log2 of the BG size in pixels */
 static uint32_t atex_cb, atex_sb;
+static uint32_t atex_frame;             /* r_frame of the last update */
 
 static inline uint8_t *atex_mem(void) {
     return (uint8_t *)CachedAddr(ring[2]);
@@ -947,8 +955,24 @@ static int atex_update(int n, uint32_t cnt) {
         for (uint32_t cy = 0; cy < mw; cy++)
             for (uint32_t cx = 0; cx < mw; cx++)
                 atex_cell(cx, cy);
+        atex_frame = r_frame;
         return 1;
     }
+    if (atex_frame + 1 != r_frame && atex_frame != r_frame) {
+        /* frames without a draw (forced blank, BG2 off, another mode): their
+         * changes were consumed by bg_track without reaching the texture,
+         * but chunk_frame records them (the chunks stay referenced) */
+        const uint8_t *vr = (const uint8_t *)gba_mem.vram;
+        for (uint32_t e = 0; e < mw * mw; e++) {
+            uint32_t tc = (cb + vr[(sb + e) ^ GBA_BX] * 64u) >> 5;
+            if (chunk_frame[(sb + e) >> 5] > atex_frame || chunk_frame[tc] > atex_frame ||
+                chunk_frame[tc + 1] > atex_frame)
+                atex_cell(e & (mw - 1), e >> (bits - 3));
+        }
+        atex_frame = r_frame;
+        return 1;
+    }
+    atex_frame = r_frame;
     /* this frame's changes: map chunks re-resolve their 32 cells, changed
      * tiles every cell that uses them */
     uint32_t tchg[8] = { 0 }, anyt = 0;
