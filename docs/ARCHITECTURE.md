@@ -74,16 +74,17 @@ changes are saved to EEPROM and read back at boot. The N64 build with the
 RDP renderer runs the same script in ares with every checked frame
 identical to the host's (128 checkpoints from the logos to Snake Way in the
 native view; 48 screenshots of three runs in the 320×240 field view), and
-keeps the save in SRAM. CPU time in ares: field play 5.4 ms game + 4.1 ms
-draw at 320×240 (4.5 + 3.7 ms in the native view), dialogue with portraits
-6.7 + 4.3 ms, logos and the animated title 3.4 + 1.1 ms (measurements
-below). Code is 3.5 MB of MIPS and BSS 1 MB; the ROM cache gets 1.26 MB.
+keeps the save in SRAM. CPU time in ares: field play 5.3 ms game + 3.3 ms
+draw at 320×240 (4.7 + 3.0 ms in the native view), dialogue with portraits
+6.5 + 3.4 ms (measurements below). Code is 3.5 MB of MIPS and BSS 1 MB; the
+ROM cache gets 1.25 MB.
 
-Open: the field's blend frames are expensive for the RDP (see
-"Measurements"); the Mode-7 style overworld (HBlank per-line BG2
-affine) and the scenes that write MOSAIC were not reached with scripted
-input (the renderer's per-line affine and mosaic paths are checked with
-synthetic states); register summaries of the ARM soft-float routines
+Open: hardware testing (the field's blend frames are estimated at 4-6 ms
+of RDP time per frame, `docs/RDP_COST.md`); the Mode-7 style overworld
+(HBlank per-line BG2 affine; its HBlank handler has a native body, checked
+with the handler forced on in field play) and the scenes that write MOSAIC
+were not reached with scripted input (the renderer's per-line affine and
+mosaic paths are checked with synthetic states); register summaries of the ARM soft-float routines
 (their save/restore of r4–r11 is not recognised, which widens the indirect
 call summary by r8–r11); the link-cable and wireless modes only reach
 "Waiting for a friend..." (cancel works; serial is not modelled); a game
@@ -142,7 +143,7 @@ For LoG2 (`games/log2/game.toml`):
   - Clean VRAM is write-protected in the TLB, so the first write to a page
     marks it dirty for the renderer.
 - ROM lives on the cartridge and is paged into a cache in 16 KB pages
-  (`platform/n64/rom_n64.c`), at most 2 MB (LoG2 2 MB, Buu's Fury 1.26 MB):
+  (`platform/n64/rom_n64.c`), at most 2 MB (LoG2 2 MB, Buu's Fury 1.25 MB):
   the RAM between `.sbss` and `.bss`, which the 256 KB alignment of guest
   memory leaves unused (0–256 KB depending on the code size), then what the
   heap has left after the renderer and the game stack. The N64 Makefile
@@ -159,17 +160,19 @@ For LoG2 (`games/log2/game.toml`):
   (SWI 2), which is where the game waits for its IRQ flags.
 - The scheduler walks the frame's events:
   - an audio FIFO block every 16 samples (DMA2 IRQ)
-  - HBlank lines, only while the mode-1 world map's HBlank IRQ is enabled
+  - HBlank lines, only while an HBlank IRQ is enabled (LoG2's mode-1 world
+    map, Buu's Fury's Mode-7 overworld)
   - VBlank at line 160: render and present first, then raise the VBlank IRQ
 - The game's IWRAM IRQ dispatcher (LoG2 0x03000824; `GAME_IRQ_*` in
   `game.h`) is replaced by a native version with the same priority and
   IE/IF/flag semantics. Handlers run as recompiled code.
 - An HBlank handler with a native body (`GAME_HBLANK_NATIVE`: LoG2's line
-  table copy `0x08011F88`) is served in place: the dispatcher's flag word and
-  stack effects are reproduced and the handler runs directly, and all the
-  HBlank lines up to the next other event (audio block, timer, VBlank) go in
-  one batch. This needs the game never to wait for HBlank (its only Halt loop
-  waits for VBlank or DMA2). Same RAM, I/O and audio as the generic path.
+  table copy `0x08011F88`, Buu's Fury's `0x08008098`) is served in place: the
+  dispatcher's flag word and stack effects are reproduced and the handler
+  runs directly, and all the HBlank lines up to the next other event (audio
+  block, timer, VBlank) go in one batch. This needs the game never to wait
+  for HBlank (in both games the only Halt loop waits for VBlank or DMA2).
+  Same RAM, I/O and audio as the generic path.
 - The BIOS is not executed. SWI 0/2/3/6 are native.
 
 **Native replacements** (`runtime/native.c`, `[[native]]` in `game.toml`):
@@ -196,6 +199,7 @@ and the tile gather at 0x030004C0 are the shared ones):
 | `0x08007D98` | Field map streamer: 64 memcpy16 row copies per layer and frame | Rows already in place are skipped, so VRAM stays clean |
 | `0x03000040` | Bit-stream LZ decoder | Resources, map chunks, sprites; the animated title decodes every frame |
 | `0x03000388` | Linear bitmap to 8x8 tiles | Title animation |
+| `0x08008098` | Mode-7 overworld HBlank handler: the next line's BG2 affine registers from the line table (lines 55-159) | Four emulated I/O stores per line, and the IRQ round trip on all 228 lines. With the handler forced on in field play (ares): 13.2-13.7 ms of game time per frame before, 6.8-7.3 ms now (5.4-5.8 ms without the handler) |
 
 The copy and fill natives write VRAM through host pointers and mark it
 dirty only where the data changes; the renderer then re-checks only real
@@ -230,6 +234,11 @@ register access of the per-line HBlank handler, 228 lines a frame) and a
 is now under 8 ms, so music and game speed stay steady. At 320×240 the
 ground's CPU rasteriser (46,000 pixels, 7–13 ms) keeps the draw over the
 frame budget, and the platform skips drawing to keep the game on time.
+With the Buu's Fury work merged (fly script, frames 2760-3600, every frame
+drawn) it takes 7.7 + 14.8 ms (main 7.5 + 14.9 ms; 7.8 + 16.2 ms before
+two minimap markers stopped opening a CPU-composited rectangle and the
+stack offset was re-measured) and, pacing with frame skip, draws 907 of
+1,560 frames (main 913, before 812).
 
 On that heaviest stretch, the same frame started this round of work at
 10.5 + 7.5 ms, which missed 60 fps. Mid-game cartridge reads went from 76
@@ -242,21 +251,25 @@ the gameplay script, every frame drawn):
 |---|---|---|---|
 | Logos and the animated title | 3.5 + 1.0 ms | 3.4 + 1.1 ms | 3.3 + 0.8 ms |
 | Story intro scenes | 4.2 + 1.5 ms | 4.8 + 1.6 ms | 4.0 + 1.4 ms |
-| Snake Way dialogue with portraits | 5.5 + 4.3 ms | 6.7 + 4.3 ms | 5.2 + 2.0 ms |
-| Snake Way field play | 4.5 + 3.7 ms | 5.4 + 4.1 ms (heaviest 11.8 ms) | 4.3 + 1.6 ms |
+| Snake Way dialogue with portraits (f5280-f7200) | 5.6 + 3.1 ms (was 5.9 + 4.1) | 6.5 + 3.4 ms (was 6.7 + 4.2) | 5.2 + 2.0 ms |
+| Snake Way field play (f7440-f10200) | 4.7 + 3.0 ms (was 4.7 + 3.8) | 5.3 + 3.3 ms, heaviest 10.7 ms (was 5.3 + 4.1, 11.8 ms) | 4.3 + 1.6 ms |
 
 "Before" is the renderer before the blend cells (part A of the Buu's Fury
-bring-up, measured the same way).  The draw time of dialogue and field play
-grew by about 2 ms: the game keeps BLDCNT `0x1041` there (BG0 a first
-target at 12/0, OBJs the 2nd target), and the 2nd-target rule makes most
-of BG0's cells go through the tagged 32-bit path (a plain pass plus one
-draw per rectangle).  On the console that path is the expensive part
-(estimated 15-22 ms of RDP time per frame in the native view and 29-41 ms
-at 320×240, `docs/RDP_COST.md`), so these frames are RDP-bound there.
-The gameplay script misses the ROM cache 78 times in the native build
-(93 with the view), almost all at the story's scene changes (part A: 113).
-LoG2 over the same merge (its 8000-frame timing script): field play 5.2 +
-1.5 ms and the heaviest window 9.7 ms (main: 5.3 + 1.5 and 10.1 ms).
+bring-up, measured the same way); "was" is the merged tree before the
+review fixes.  The game keeps BLDCNT `0x1041` in dialogue and field play
+(BG0 a first target at 12/0, OBJs the 2nd target).  The blend cells first
+sent most of BG0's cells through the tagged 32-bit path (about 2 ms more
+draw time than part A, and an estimated 15-22 ms of RDP time per frame
+native, 29-41 ms at 320×240); now only cells where an OBJ lies under BG0
+do, BG0 is drawn plainly elsewhere, and the estimate is 2.5-4.1 ms native
+and 3.7-5.7 ms at 320×240 (`docs/RDP_COST.md`).  The CPU draw time of
+field play is still 1.4 ms above part A's in the native view (not
+analysed).  The gameplay script misses the ROM cache 92 times in the native
+view and 105 times with the view (93 before the fixes: the code grew by
+7 KB, which cost the cache one 16 KB page), almost all at the story's
+scene changes (part A: 113).  LoG2's 8000-frame timing script: 4.76 +
+1.51 ms per frame, heaviest window 9.6 ms (main: 4.85 + 1.57 and 10.1
+ms).
 
 **Pacing** (`platform/n64/main.c`, `frame_pace`): the game runs on its own
 real-time schedule, one GBA frame per 267.52 audio samples at the AI's
@@ -277,10 +290,19 @@ the queue is refilled with silence at once.
 - BSS: 0.9 MB (Buu's Fury: 1 MB), of which guest memory is 512 KB. It was
   1.6 MB while the N64 build kept guest page tables and guest memory sat
   behind 255 KB of padding.
-- ROM page cache: 2 MB, with 1 MB of heap to spare (Buu's Fury: 1.26 MB,
+- ROM page cache: 2 MB, with 1 MB of heap to spare (Buu's Fury: 1.25 MB,
   what is left).
-- The game stack's top is placed at offset 0x1000 of the D-cache's 8 KB
-  index space; where it falls was worth up to 1.2 ms per frame.
+- The game stack's top is placed at offset 0x1400 of the D-cache's 8 KB
+  index space; where it falls is worth up to 0.75 ms per frame. Guest
+  memory comes first in the 256 KB-aligned `.bss`, so the indices of the
+  hot objects after it (cpu, the dispatch table, the renderer's row and
+  slot tables) depend on what `.bss` holds, not on the code size: moving
+  guest memory first shifted them by 0x2E0 (not by exactly 256 KB), and
+  the review fixes' renderer state moved the row and slot tables again.
+  Measured on the final layout (game + draw): LoG2's world map 22.50 ms at
+  0x1400 against 22.61-23.25 at the other 1 KB steps, LoG2's 8000-frame
+  script 6.27 ms (best 6.25 at 0x0000), Buu's Fury's field script 7.56 ms
+  (best 7.46 at 0x1000). Re-check it when `.bss` objects are added.
 
 **Fault-emulated accesses** run at about 3 per frame in steady state: the sound
 IRQ handler's DMA register writes, which use a register-relative address.
@@ -334,19 +356,23 @@ the interpreter (`runtime/interp.c`) a reference for the recompiled code:
   both); unrotated lines copy their texel row first; a line with the
   parameters of the line above is a copy.
 - Alpha blending goes through a 32-bit intermediate, which is slow on
-  hardware, so only the 8x8 cells where a first target can have a pixel use
-  it; the rest of the frame takes the plain COPY path.  The game keeps BLDCNT
+  hardware, so only the 8x8 cells where a first target can have a pixel over
+  a 2nd target use it; the rest of the frame takes the plain COPY path (a
+  first target with only non-targets under it is drawn there without its
+  effect).  The game keeps BLDCNT
   set for an empty BG0 in its field maps and during dialogues, so those
   frames cost the same as ordinary ones.  The cost model behind this and its
   calibration on the Analogue 3D: `docs/RDP_COST.md`.
 - Where drawing one OBJ at a time is not the GBA's OBJ layer, the OBJ pixels
-  of a rectangle are composited on the CPU with the reference renderer's
-  rules: a later OBJ with a better priority over an earlier one (its
-  transparent texels still pass their priority down), OBJ mosaic, and an
-  OBJ that blends over another OBJ. The composed pixels are drawn as one
-  item per (priority, semi-transparency) and take part in the blend cells
-  like any OBJ (their cells: the boxes of the OBJs with that code inside the
-  rectangle); the other OBJs are clipped around the rectangle.
+  of up to four rectangles ("holes": the places that need it, gathered so
+  that two far apart get two small holes) are composited on the CPU with the
+  reference renderer's rules: a later OBJ with a better priority over an
+  earlier one where a displayed BG or a third OBJ has a priority between
+  theirs (its transparent texels still pass their priority down), OBJ
+  mosaic, and an OBJ that blends over another OBJ. The composed pixels are
+  drawn as one item per hole and (priority, semi-transparency) and take part
+  in the blend cells like any OBJ (their cells: the boxes of the OBJs with
+  that code inside the hole); the other OBJs are clipped around the holes.
 - BG mosaic: text BGs with mosaic are drawn in software (every cell counts
   as touched for the blend cells), affine and bitmap BGs apply it in their
   software raster (an affine BG2 with mosaic never uses the resolved

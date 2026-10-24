@@ -857,7 +857,7 @@ in 620 field frames (1,192,780 cells).
 The N64 build always asks for the view, which turns the widening on.
 
 **Results.** In ares, every 320x240 screenshot equals the host `--ws` frame
-at 5-bit precision, with the normal ROM cache (1264 KB in this build). Each
+at 5-bit precision, with the normal ROM cache (1248 KB in this build). Each
 run must start with a blank cartridge SRAM: ares keeps it next to the test
 ROM (`dbz_test.ram` in the build directory), so a run that follows one that
 saved starts from that save, while the host runs start without one. The
@@ -869,9 +869,11 @@ explorer path writes a game-progress save. The screenshots:
   West City)
 
 CPU time in ares with the view (game + draw, means of the 120-frame windows
-of the gameplay script, every frame drawn): Snake Way field play 5.4 + 4.1
-ms (heaviest window 11.8 ms), dialogue with portraits 6.7 + 4.3 ms; the
-native view costs 0.8-1.2 ms less game time.  On the explorer path (frames
+of the gameplay script, every frame drawn): Snake Way field play 5.3 + 3.3
+ms (heaviest window 10.7 ms; 5.3 + 4.1 and 11.8 ms before the blend cells
+skipped the cells where no OBJ lies under BG0), dialogue with portraits
+6.5 + 3.4 ms (was 6.7 + 4.2); the native view costs 0.8-1.2 ms less game
+time.  On the explorer path (frames
 not drawn) the game took 5.7 ms per frame (median; the highest window 9.2
 ms).
 
@@ -892,9 +894,11 @@ ms).
 - **Targeting mode.** While B is held, the reticle stops at the native
   screen's edge, and targets in the margin cannot be picked (see above).
 - **Despawn widening is a gameplay change by design**, as in LoG2.
-- **RDP time on hardware.** The field's blend frames (BLDCNT `0x1041`) tag
-  most of BG0's cells in the 32-bit path; the cost model puts them at 29-41
-  ms of RDP time per frame at 320x240 (`docs/RDP_COST.md`, "Buu's Fury").
+- **RDP time on hardware.** The field's blend frames (BLDCNT `0x1041`) need
+  the 32-bit path only where an OBJ lies under BG0; the cost model puts them
+  at 3.7-5.7 ms of RDP time per frame at 320x240 (it was 29-41 ms while most
+  of BG0 was tagged, `docs/RDP_COST.md`, "Buu's Fury"). Not measured on
+  hardware.
 - **Not ported from LoG2's later work:** the margin fill of maps smaller
   than the view, and LoG2's pause-menu and file-select view (Buu's menus use
   other layers; they stay native).

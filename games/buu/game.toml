@@ -403,7 +403,7 @@ func = "native_clip"
 # 16KB ROM pages loaded into the N64 ROM cache at boot (host --rom-profile
 # traces of the gameplay script and a 20000-frame attract run).  The cache
 # here is the padding before .bss plus what the heap has left (see
-# platform/n64/main.c): 1264 KB, 79 pages, with the current code size (it
+# platform/n64/main.c): 1248 KB, 78 pages, with the current code size (it
 # was 76 when this list was made).  The script alone touches 118 pages, so
 # only the 52 pages field play uses most are pinned (most frames first),
 # leaving a third of the cache to the LRU for scene changes.  In a

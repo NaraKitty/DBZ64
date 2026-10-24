@@ -40,7 +40,7 @@ emulator.
   CPU first. Its output is pixel-identical to a
   reference software renderer in every frame tested. Translucent effects
   (dialogue boxes, sunbeams, rain) only take the slow blending route in the
-  screen cells where they can actually show.
+  screen cells where they can actually blend with something.
 - **The real soundtrack.** The game's own music engine and sound effects run
   as recompiled code. Its hottest mixing loops are replaced by native C that
   produces byte-identical audio.

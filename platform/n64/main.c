@@ -41,7 +41,7 @@ void gba_boot(void);
 #define ROM_CACHE_BYTES  (2 * 1024 * 1024)
 #define ROM_HEAP_RESERVE (192 * 1024)
 #define GAME_STACK       (256 * 1024)
-#define GAME_STACK_TOP_INDEX 0x1000                 /* see main() */
+#define GAME_STACK_TOP_INDEX 0x1400                 /* see main() */
 #define GAME_STACK_ALLOC (GAME_STACK + 0x2000)
 /* the GBA produces 267.52 samples per frame; we show one GBA frame per N64
  * refresh, so the audio rate follows the N64 refresh rate */
@@ -765,8 +765,14 @@ int main(void) {
      * D-cache's 8KB index space (direct mapped): every recompiled call
      * spills to it, and where it falls against the hot data (the guest
      * stack and variables in IWRAM, cpu, the dispatch table) is worth up to
-     * 1.2 ms per frame.  Measured at every 1KB step (game + draw in LoG2's
-     * and Buu's Fury's field play), 0x1000 is the best for both. */
+     * 1.2 ms per frame.  With guest memory first in the 256KB-aligned .bss
+     * (bss_gap.ld) the hot objects' indices depend only on what .bss holds,
+     * not on the code size: re-check this offset when .bss objects are
+     * added.  Measured on this layout (game + draw; the world map at every
+     * 1KB step, the others at 0x0000/0x0800/0x1000/0x1400/0x1C00): 0x1400 is
+     * the best on LoG2's mode-1 world map (22.5 ms against 22.6-23.3), the
+     * one scene over the frame budget, and within 0.1 ms of the best in
+     * LoG2's 8000-frame script (6.3 ms) and Buu's Fury's field play (7.6). */
     uint8_t *stack = memalign(8192, GAME_STACK_ALLOC);
     if (!stack)
         gba_panic("cannot allocate the game stack (%d bytes)", GAME_STACK_ALLOC);
