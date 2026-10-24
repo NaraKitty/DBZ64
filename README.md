@@ -30,12 +30,15 @@ emulator.
   screen edges, and location banners run the full width. Rooms smaller than
   the screen are continued past their edges with their own trees, rock and
   sand (interiors keep their black surround). The pause menu and file select
-  fill the screen with their starfield. Title and logo screens stay
-  pixel-exact and centred.
+  fill the screen with their starfield, and the Mode-7 world map you fly over
+  is drawn at 320×240 too. Title and logo screens stay pixel-exact and
+  centred.
 - **Hardware-accelerated graphics.** The GBA's tile and sprite engine is
   rebuilt on the N64's RDP. It covers background layers, sprites, flips,
   alpha blending and brightness effects. Its output is pixel-identical to a
-  reference software renderer in every frame tested.
+  reference software renderer in every frame tested. Translucent effects
+  (dialogue boxes, sunbeams, rain) only take the slow blending route in the
+  screen cells where they can actually show.
 - **The real soundtrack.** The game's own music engine and sound effects run
   as recompiled code. Its hottest mixing loops are replaced by native C that
   produces byte-identical audio.
