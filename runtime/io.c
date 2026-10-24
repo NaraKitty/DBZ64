@@ -15,6 +15,7 @@
  *    16-sample burst.
  */
 #include <string.h>
+#include <stdint.h>
 #include <setjmp.h>
 #include "io.h"
 #include "widescreen.h"
@@ -228,6 +229,23 @@ void gba_dma_settle16(int ch, uint32_t sad, uint32_t dad, uint32_t n) {
     d->active_fifo = 0;
 }
 
+/* The same for an immediate, incrementing 32-bit transfer of n words (the
+ * control word ends as 0x0400: word size, enable cleared). */
+void gba_dma_settle32(int ch, uint32_t sad, uint32_t dad, uint32_t n) {
+    uint32_t base = REG_DMA0SAD + 12 * ch;
+    W16(base, (uint16_t)sad);
+    W16(base + 2, (uint16_t)(sad >> 16));
+    W16(base + 4, (uint16_t)dad);
+    W16(base + 6, (uint16_t)(dad >> 16));
+    W16(base + 8, (uint16_t)n);
+    W16(base + 10, 0x0400);
+    dma_t *d = &dma[ch];
+    d->src = ((sad & (ch == 0 ? 0x07FFFFFFu : 0x0FFFFFFFu)) & ~3u) + 4 * n;
+    d->dst = ((dad & (ch == 3 ? 0x0FFFFFFFu : 0x07FFFFFFu)) & ~3u) + 4 * n;
+    d->count = n & (ch == 3 ? 0xFFFFu : 0x3FFFu);
+    d->active_fifo = 0;
+}
+
 static void dma_write_cnt(int ch, uint16_t v) {
     uint32_t base = REG_DMA0SAD + 12 * ch;
     uint16_t old = R16(base + 10);
@@ -387,15 +405,63 @@ static void snapshot_line(int line) {
     }
 }
 
-static int hblank_wanted(void) {
-    return (R16(REG_IE) & IRQ_HBLANK) && (R16(REG_DISPSTAT) & 0x10);
-}
-
 static void set_time(uint64_t t) {
     now = t;
     gba_frame_count = (uint32_t)(t / GBA_CYCLES_PER_FRAME);
     gba_frame_cycle = (uint32_t)(t % GBA_CYCLES_PER_FRAME);
 }
+
+static int hblank_wanted(void) {
+    return (R16(REG_IE) & IRQ_HBLANK) && (R16(REG_DISPSTAT) & 0x10);
+}
+
+#ifdef GAME_HBLANK_NATIVE
+void GAME_HBLANK_NATIVE_FN(void);
+
+/* An HBlank IRQ whose handler has a native body (game.h GAME_HBLANK_NATIVE,
+ * e.g. LoG2's mode-1 line-table copy, 228 times a frame), served in place.
+ * It leaves exactly what raise_irq() + gba_irq_service() leave: the halt
+ * loop that called us sees no pending IRQ either way (the game's only Halt
+ * loop never waits for HBlank, game.h), IE, IF and IME end as they were,
+ * the fired-flags word gets the HBlank bit, run_handler()'s word goes below
+ * the stack, and the handler body runs with the registers run_handler()
+ * gives it, which are all restored afterwards.  Only the natives' inputs
+ * (r13) and outputs (r0-r3, flags) are saved instead of the whole CPU. */
+static int hblank_native_ok(void) {
+    if (in_irq || !(R16(REG_IME) & 1) || (R16(REG_IE) & R16(REG_IF)) ||
+        gba_mem.iwram[((IRQ_TABLE + 4) & 0x7FFC) >> 2] != GAME_HBLANK_NATIVE)
+        return 0;
+    /* no HBlank DMA: it could raise an IRQ between the lines of a batch */
+    for (int ch = 0; ch < 4; ch++) {
+        uint16_t cnt = R16(REG_DMA0SAD + 12 * ch + 10);
+        if ((cnt & 0x8000) && ((cnt >> 12) & 3) == 2)
+            return 0;
+    }
+    return 1;
+}
+
+/* Serve the HBlanks at hb, hb + 1 line, ... while they come before 'until'
+ * (hblank_native_ok() checked).  Nothing between them runs guest code or
+ * touches what the checks look at, and the handler's register, flag-word
+ * and stack effects are the same for every line, so they are done once. */
+static void hblank_native_batch(uint64_t hb, uint64_t until) {
+    *(uint16_t *)((uint8_t *)gba_mem.iwram + ((IRQ_FLAGS & 0x7FFE) ^ GBA_HX)) |= IRQ_HBLANK;
+    uint32_t r0 = cpu.r[0], r1 = cpu.r[1], r2 = cpu.r[2], r3 = cpu.r[3], sp = cpu.r[13];
+    uint32_t n = cpu.n, z = cpu.z, c = cpu.c, v = cpu.v;
+    cpu.r[13] = sp - 4;
+    wr32(sp - 4, 0x00000138u);
+    for (; hb < until; hb += GBA_CYCLES_PER_LINE) {
+        set_time(hb);
+        GAME_HBLANK_NATIVE_FN();
+        /* registers written now are used for the next line */
+        int nl = (int)cur_line() + 1;
+        snapshot_line(nl >= (int)GBA_LINES ? 0 : nl);
+    }
+    gba_line_regs_valid = 1;
+    cpu.r[0] = r0; cpu.r[1] = r1; cpu.r[2] = r2; cpu.r[3] = r3; cpu.r[13] = sp;
+    cpu.n = n; cpu.z = z; cpu.c = c; cpu.v = v;
+}
+#endif
 
 /* Advance to the next event and process it. */
 static void run_next_event(void) {
@@ -403,27 +469,44 @@ static void run_next_event(void) {
     uint64_t vblank = frame_base + 160ull * GBA_CYCLES_PER_LINE;
     if (vblank <= now)
         vblank += GBA_CYCLES_PER_FRAME;
-    uint64_t t = vblank;
-    int ev = 0;   /* 0 vblank, 1 hblank, 2 audio, 3+i timer i */
-
-    if (hblank_wanted()) {
-        uint64_t lb = now - (gba_frame_cycle % GBA_CYCLES_PER_LINE);
-        uint64_t hb = lb + 1006;
-        if (hb <= now)
-            hb += GBA_CYCLES_PER_LINE;
-        if (hb < t) { t = hb; ev = 1; }
-    }
+    /* the next event; on a tie the one tested first wins: VBlank, HBlank,
+     * audio, timers 0..3 */
+    uint64_t t_at = UINT64_MAX;          /* audio and timers */
+    int ev_at = 0;
     if ((tmr[0].ctl & 0x80) && (dma[1].active_fifo || dma[2].active_fifo)) {
         if (next_audio <= now)
             next_audio = now + 1;
-        if (next_audio < t) { t = next_audio; ev = 2; }
+        t_at = next_audio;
+        ev_at = 2;
     }
     for (int i = 0; i < 4; i++) {
         if ((tmr[i].ctl & 0xC4) == 0xC0) {
             uint64_t o = timer_next_overflow(i);
-            if (o < t) { t = o; ev = 3 + i; }
+            if (o < t_at) { t_at = o; ev_at = 3 + i; }
         }
     }
+    uint64_t t = vblank, hb = 0;
+    int ev = 0;   /* 0 vblank, 1 hblank, 2 audio, 3+i timer i */
+    if (hblank_wanted()) {
+        uint64_t lb = now - (gba_frame_cycle % GBA_CYCLES_PER_LINE);
+        hb = lb + 1006;
+        if (hb <= now)
+            hb += GBA_CYCLES_PER_LINE;
+        if (hb < t) { t = hb; ev = 1; }
+    }
+    if (t_at < t) { t = t_at; ev = ev_at; }
+#ifdef GAME_HBLANK_NATIVE
+    if (ev == 1 && hblank_native_ok()) {
+        /* served in place they leave the halt loop nothing to do, so all
+         * the HBlanks up to the next other event (VBlank wins a tie, audio
+         * and timers lose it) go at once */
+        uint64_t until = vblank;
+        if (t_at < UINT64_MAX && t_at + 1 < until)
+            until = t_at + 1;
+        hblank_native_batch(hb, until);
+        return;
+    }
+#endif
     set_time(t);
     switch (ev) {
     case 0:

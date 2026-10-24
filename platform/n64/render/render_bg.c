@@ -78,7 +78,12 @@ uint32_t bg_trace_cmp;
 
 void bg_init(void) {
     for (int n = 0; n < 4; n++) {
-        ring[n] = malloc_uncached_aligned(64, RING_W * RING_H);
+        /* rings 2 and 3 are one block: in modes 1 and 2 (no text BG2/BG3)
+         * it holds the affine BG texture (see "affine texture" below) */
+        if (n == 3)
+            ring[3] = ring[2] + RING_W * RING_H;
+        else
+            ring[n] = malloc_uncached_aligned(64, (n == 2 ? 2 : 1) * RING_W * RING_H);
         memset(ring[n], 0, RING_W * RING_H);
         ring_surf[n] = surface_make(ring[n], FMT_CI8, RING_W, RING_H, RING_W);
     }
@@ -154,7 +159,10 @@ void bg_invalidate_layer(int n) {
     ls[n].valid = 0;        /* next frame re-checks every cell in view */
 }
 
+static void atex_drop(int unref);
+
 void bg_invalidate(void) {
+    atex_drop(0);                       /* its chunk references go below */
     for (int n = 0; n < 4; n++) {
         layer_reset(n);
         ls[n].key = 0xFFFFFFFFu;
@@ -531,6 +539,8 @@ static void scroll_of(int n, int line, int *h, int *v) {
 }
 
 void bg_draw_text(int n, int fx) {
+    if (n >= 2)
+        atex_drop(1);                   /* rings 2/3 are rings again */
     uint32_t cnt = io16(REG_BG0CNT + 2 * n);
     r_bind(PAL_BG, fx);
     /* bands of lines with the same scroll (HBlank snapshots may differ per line) */
@@ -558,11 +568,141 @@ void bg_draw_text(int n, int fx) {
     }
 }
 
+/* ------------------------------------------------------------ affine texture */
+
+/* A wrapping affine BG2 of up to 512x512 (the mode-1 world map's ground) is
+ * sampled from a resolved 8bpp texture, the map entry and the tile already
+ * looked up, so a pixel costs one load.  It is stored in 8x8 tiles of 64
+ * bytes in map order (texel (x,y) at ((y>>3)*S/8 + (x>>3))*64 + (y&7)*8 +
+ * (x&7)), which keeps a rotated line's texels in fewer cache lines than a
+ * linear texture (measured in ares: a 4x4-texel block per cache line was no
+ * faster, and slower for unrotated lines).  It lives in the block of text rings 2 and 3 (256KB,
+ * unused as rings while BG2 is affine and BG3 is not a text BG), through its
+ * cached alias.  The texture follows VRAM through the BG chunk tracking: it
+ * references the map and the 256 tiles of its char base, and every frame
+ * re-resolves the cells whose map entry chunk or tile data changed.  Before
+ * the rings are used again (a text BG2/BG3, bg_invalidate) the cached lines
+ * are discarded, so they can never be written back over ring data. */
+#define AFF_ROW_MAX 640                 /* widest line rasterised from the texture */
+static int atex_bg = -1;                /* BG holding the texture, -1 none */
+static uint32_t atex_key;               /* BGxCNT: char base, screen base, size */
+static int atex_bits;                   /* log2 of the BG size in pixels */
+static uint32_t atex_cb, atex_sb;
+
+static inline uint8_t *atex_mem(void) {
+    return (uint8_t *)CachedAddr(ring[2]);
+}
+
+static void atex_refs(int add) {
+    uint32_t cells = 1u << (2 * (atex_bits - 3));
+    for (uint32_t c = atex_sb >> 5; c < (atex_sb + cells) >> 5 && c < 0x10000u / 32; c++) {
+        if (add) chunk_ref(c);
+        else chunk_refs[c]--;
+    }
+    for (uint32_t c = atex_cb >> 5; c < (atex_cb + 0x4000u) >> 5; c++) {
+        if (add) chunk_ref(c);
+        else chunk_refs[c]--;
+    }
+}
+
+static void atex_drop(int unref) {
+    if (atex_bg < 0)
+        return;
+    if (unref)
+        atex_refs(0);
+    data_cache_hit_invalidate(atex_mem(), 1u << (2 * atex_bits));
+    atex_bg = -1;
+}
+
+/* texels of map cell (cx,cy) from the map entry and the tile in VRAM */
+static void atex_cell(uint32_t cx, uint32_t cy) {
+    int bits = atex_bits;
+    r_stats.aff_cells++;
+    uint32_t tile = r_vram8(r_vram_wrap(atex_sb + (cy << (bits - 3)) + cx));
+    /* a row is one native doubleword [w0][w1] holding pixels 3..0, 7..4
+     * (char base + 255 tiles stays inside BG VRAM) */
+    const uint64_t *src = (const uint64_t *)(gba_mem.vram + ((atex_cb + tile * 64) >> 2));
+    uint64_t *dst = (uint64_t *)(atex_mem() + (((cy << (bits - 3)) + cx) << 6));
+    const uint64_t m8 = 0x00FF00FF00FF00FFull, m16 = 0x0000FFFF0000FFFFull;
+    /* the 64-byte tile is four whole D-cache lines: create them dirty
+     * instead of reading them from RDRAM first (Create_Dirty_Exclusive) */
+    for (int k = 0; k < 64; k += 16)
+        __asm__ volatile("cache 0x0D, 0(%0)" :: "r"((uint8_t *)dst + k) : "memory");
+    for (int r = 0; r < 8; r++) {
+        uint64_t x = src[r];
+        x = ((x & m8) << 8) | ((x >> 8) & m8);
+        dst[r] = ((x & m16) << 16) | ((x >> 16) & m16);
+    }
+}
+
+/* make the texture current for BG n with BGxCNT cnt; 0 = not usable */
+static int atex_update(int n, uint32_t cnt) {
+    uint32_t sz = (cnt >> 14) & 3;
+    if (n != 2 || !(cnt & 0x2000) || sz > 2)
+        return 0;
+    uint32_t key = cnt & 0xFF0C;
+    uint32_t cb = ((cnt >> 2) & 3) * 0x4000u, sb = ((cnt >> 8) & 31) * 0x800u;
+    int bits = 7 + (int)sz;
+    uint32_t mw = 1u << (bits - 3);
+    if (sb + mw * mw > 0x10000u)        /* map reaching into OBJ VRAM: not tracked */
+        return 0;
+    if (atex_bg != n || atex_key != key) {
+        atex_drop(1);
+        /* the rings' contents are gone: layers 2 and 3 start over */
+        for (int k = 2; k < 4; k++) {
+            layer_release(k);
+            layer_reset(k);
+            ls[k].key = 0xFFFFFFFFu;
+        }
+        atex_bg = n;
+        atex_key = key;
+        atex_bits = bits;
+        atex_cb = cb;
+        atex_sb = sb;
+        atex_refs(1);
+        for (uint32_t cy = 0; cy < mw; cy++)
+            for (uint32_t cx = 0; cx < mw; cx++)
+                atex_cell(cx, cy);
+        return 1;
+    }
+    /* this frame's changes: map chunks re-resolve their 32 cells, changed
+     * tiles every cell that uses them */
+    uint32_t tchg[8] = { 0 }, anyt = 0;
+    uint32_t mend = sb + mw * mw;
+    for (int i = 0; i < nchanged; i++) {
+        uint32_t a = changed[i] * 32u;
+        if (a >= sb && a < mend)
+            for (uint32_t e = a - sb; e < a - sb + 32 && e < mw * mw; e++)
+                atex_cell(e & (mw - 1), e >> (bits - 3));
+        if (a >= cb && a < cb + 0x4000u) {
+            uint32_t t = (a - cb) >> 6;
+            tchg[t >> 5] |= 1u << (t & 31);
+            anyt = 1;
+        }
+    }
+    if (anyt) {
+        const uint8_t *vr = (const uint8_t *)gba_mem.vram;
+        for (uint32_t e = 0; e < mw * mw; e++) {
+            uint32_t t = vr[(sb + e) ^ GBA_BX];
+            if ((tchg[t >> 5] >> (t & 31)) & 1)
+                atex_cell(e & (mw - 1), e >> (bits - 3));
+        }
+    }
+    return 1;
+}
+
 /* ------------------------------------------------------------ CPU raster */
 
 typedef struct { int32_t x, y, pa, pc; } aff_t;
 
 static void affine_line(int n, int line, aff_t *a) {
+    if ((line < 0 || line >= 160) && r_view && r_view->bg_affine) {
+        int32_t p[4];
+        if (r_view->bg_affine(n, line, p)) {
+            a->x = p[0]; a->y = p[1]; a->pa = p[2]; a->pc = p[3];
+            return;
+        }
+    }
     if (n == 2 && gba_line_regs_valid && line >= 0 && line < 160) {
         const gba_line_regs_t *s = &gba_line_regs[line];
         a->pa = (int16_t)s->bg2pa;
@@ -594,6 +734,93 @@ void bg_draw_affine(int n, int fx) {
     if (done_frame[n - 2] == r_frame)       /* drawn again in a later pass of this frame */
         goto blit;
     done_frame[n - 2] = r_frame;
+#ifdef NO_ATEX                          /* (benchmarks: the generic path only) */
+    if (0) {
+#else
+    if (pitch <= AFF_ROW_MAX && atex_update(n, cnt)) {
+#endif
+        r_stats.us_aff_update = (uint32_t)TICKS_TO_US(get_ticks() - t0);
+        /* from the resolved texture, one line at a time into a cached row
+         * (a line with the parameters of the line above is a copy of it).
+         * Texture coordinates are kept "dilated": the 8 fraction bits, then
+         * the integer bits spread over the fields of the tiled offset, with
+         * the other coordinate's fields as gaps.  A step fills the gaps with
+         * ones (carries cross them), adds and clears them again; the wrap
+         * carry out of the top field lands in a cleared bit.  U and V share
+         * one 64-bit word (U in the high half), so a step is three
+         * instructions, and the texel offset is (U | V) >> 8. */
+        static uint64_t row[AFF_ROW_MAX / 8];
+        uint8_t *rowb = (uint8_t *)row;
+        const uint8_t *tex = atex_mem();
+        const int bits = atex_bits, hb = bits - 3;
+        const uint32_t cm = (1u << (8 + bits)) - 1;          /* coordinate: 8.bits */
+        const uint32_t hm = (1u << hb) - 1;
+        const uint32_t KU = 0xFFu | (7u << 8) | (hm << 14), KV = 0xFFu | (7u << 11) | (hm << (14 + hb));
+        /* gaps between the fields (not above the top one) */
+        const uint32_t GU = 7u << 11, GV = (7u << 8) | (hm << 14);
+        const uint64_t G = ((uint64_t)GU << 32) | GV, K = ((uint64_t)KU << 32) | KV;
+#define DIL_U(c) (((c) & 0xFFu) | ((((c) >> 8) & 7u) << 8) | (((c) >> 11) << 14))
+#define DIL_V(c) (((c) & 0xFFu) | ((((c) >> 8) & 7u) << 11) | (((c) >> 11) << (14 + hb)))
+        aff_t prev = { 0, 0, 0, 0 };
+        int have = 0;
+        for (int yy = 0; yy < h; yy++) {
+            aff_t a;
+            affine_line(n, R.gy0 + yy, &a);
+            uint64_t *dst = (uint64_t *)(buf + yy * pitch);
+            if (!have || a.x != prev.x || a.y != prev.y || a.pa != prev.pa || a.pc != prev.pc) {
+                uint32_t tx = ((uint32_t)a.x + (uint32_t)(a.pa * R.gx0)) & cm;
+                uint32_t ty = ((uint32_t)a.y + (uint32_t)(a.pc * R.gx0)) & cm;
+                uint32_t dU = DIL_U((uint32_t)a.pa & cm), dV = DIL_V((uint32_t)a.pc & cm);
+                int32_t span = ((int32_t)(pitch - 1) * a.pa) >> 8;
+                if (a.pc == 0 && span > -480 && span < 480) {
+                    /* one texel row: copied to a linear row (8 texels per
+                     * load), then sampled with a plain fixed-point step */
+                    static uint64_t lin[(512 + 32) / 8];
+                    const uint8_t *tr = tex + ((DIL_V(ty) & ~0xFFu) >> 8);
+                    int32_t t0 = (int32_t)(tx >> 8), t1 = t0 + span;   /* first, last texel */
+                    /* (the last texel can be one off t1: a texel of margin each side) */
+                    int32_t lo = ((t0 < t1 ? t0 : t1) - 1) & ~7, hi = (t0 < t1 ? t1 : t0) + 1;
+                    uint32_t smask = (1u << bits) - 1;
+                    for (int32_t c = lo, k = 0; c <= hi; c += 8, k++)
+                        lin[k] = *(const uint64_t *)(tr + ((((uint32_t)c & smask) >> 3) << 6));
+                    const uint8_t *lb = (const uint8_t *)lin;
+                    uint32_t L = tx - ((uint32_t)lo << 8), dL = (uint32_t)a.pa;
+#define PX_LIN(k) do { o[k] = lb[L >> 8]; L += dL; } while (0)
+                    for (uint8_t *o = rowb, *e = rowb + pitch; o < e; o += 8) {
+                        PX_LIN(0); PX_LIN(1); PX_LIN(2); PX_LIN(3);
+                        PX_LIN(4); PX_LIN(5); PX_LIN(6); PX_LIN(7);
+                    }
+#undef PX_LIN
+                } else if (a.pc == 0) {
+                    /* one texel row, minified */
+                    const uint8_t *tr = tex + ((DIL_V(ty) & ~0xFFu) >> 8);
+                    uint32_t U = DIL_U(tx);
+#define PX_ROW(k) do { o[k] = tr[U >> 8]; U = ((U | GU) + dU) & KU; } while (0)
+                    for (uint8_t *o = rowb, *e = rowb + pitch; o < e; o += 8) {
+                        PX_ROW(0); PX_ROW(1); PX_ROW(2); PX_ROW(3);
+                        PX_ROW(4); PX_ROW(5); PX_ROW(6); PX_ROW(7);
+                    }
+#undef PX_ROW
+                } else {
+                    uint64_t W = ((uint64_t)DIL_U(tx) << 32) | DIL_V(ty);
+                    const uint64_t D = ((uint64_t)dU << 32) | dV;
+#define PX(k) do { o[k] = tex[((uint32_t)(W >> 32) | (uint32_t)W) >> 8]; W = ((W | G) + D) & K; } while (0)
+                    for (uint8_t *o = rowb, *e = rowb + pitch; o < e; o += 8) {
+                        PX(0); PX(1); PX(2); PX(3); PX(4); PX(5); PX(6); PX(7);
+                    }
+#undef PX
+                }
+                prev = a;
+                have = 1;
+            }
+            for (int x = 0; x < pitch; x += 8)
+                dst[x >> 3] = row[x >> 3];
+        }
+#undef DIL_U
+#undef DIL_V
+        r_stats.us_raster += (uint32_t)TICKS_TO_US(get_ticks() - t0);
+        goto blit;
+    }
     const uint8_t *vr = (const uint8_t *)gba_mem.vram;
     int fast = wrap && sb + (size >> 3) * (size >> 3) <= 0x10000u && cb + 0x4000u <= 0x10000u;
     for (int yy = 0; yy < h; yy++) {

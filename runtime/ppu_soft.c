@@ -113,6 +113,16 @@ typedef struct {
  * exact reference point the game installed for that line; otherwise the
  * internal reference point is BGxX/BGxY advanced by PB/PD once per line. */
 static void bg_affine(int n, int line, affine_line_t *a) {
+    if ((line < 0 || line >= PPU_SOFT_HEIGHT) && span_view && span_view->bg_affine) {
+        int32_t p[4];
+        if (span_view->bg_affine(n, line, p)) {
+            a->x = p[0];
+            a->y = p[1];
+            a->pa = p[2];
+            a->pc = p[3];
+            return;
+        }
+    }
     if (n == 2 && line_snapshot(line)) {
         const gba_line_regs_t *s = &gba_line_regs[line];
         a->pa = (int16_t)s->bg2pa;

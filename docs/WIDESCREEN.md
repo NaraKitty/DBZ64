@@ -5,9 +5,10 @@ map is not stretched. Field maps include towns, the overworld, and the real-time
 battles and bosses that run on field maps. The HUD and dialogue are re-anchored
 toward the screen edges, and location banners run the full width. Maps smaller
 than the view are continued past their edges (see "Margin fill"). The pause
-menu and the file select fill the view too (see "Menus"). Every other screen
-(title, logos and the mode-1 map) shows the native 240x160 frame centred at
-(40,40) with a black border.
+menu and the file select fill the view too (see "Menus"), and so does the
+mode-1 world map (flying over the overworld; see "Mode-1 world map"). Every
+other screen (title, logos) shows the native 240x160 frame centred at (40,40)
+with a black border.
 
 The interface is `runtime/widescreen.h`. The LoG2 code is in
 `games/log2/widescreen.c`, and the hook sites are in `games/log2/game.toml`
@@ -397,7 +398,6 @@ Results over these runs:
     cliff path with a sky backdrop, a desert canyon): the explorer runs reach
     only interiors among the small maps. The margin rules were checked on
     clipped large maps instead (see "Margin fill").
-  - the mode-1 world map
   - beam attacks that use the `0x08014894` emitter (the fix is verified only by code)
 - **Sprite classes.** Sprite classes that never appeared in testing are classified statically:
   - Unknown classes count as world. A HUD element of an unknown class stays at its
@@ -425,4 +425,97 @@ Results over these runs:
   is not affected.
 - **Windows (WIN0/WIN1)** are never used by this game. `ppu_soft` extends a window to the
   margins only when it spans the whole native width or height.
-- **The mode-1 map** (affine BG2 with HBlank matrices) stays native.
+- **The mode-1 world map**: see the limitations at the end of its section.
+
+## Mode-1 world map
+
+The screen where the player flies over the world (`games/log2/ws_mode1.c`;
+`widescreen.c` calls into it when the frame is not a field map). DISPCNT mode 1:
+
+| Layer | What | Object (`0x0300107C` + 4n) |
+|---|---|---|
+| BG2 | affine ground plane, a 512x512 wrapping VRAM map streamed from a 4096x3328 world | vt `0x08023E7C` |
+| BG1 | sky panorama: a 64x32-cell map at obj+8; the game DMAs the 32 columns in view into the hardware map and sets HOFS to the scroll | vt `0x08023A00` |
+| BG0 | a field layer: the minimap outline (top right) and the haze band over the horizon (rows 7..11), 240 px wide | vt `0x08023868` |
+| OBJ | player (`0x08025F28`) and shadow (`0x080250D4`), minimap markers (`0x08024064`, `0x08025C08`), ground landmarks (`0x08025E5C`, `0x08025F90`, `0x08025FB8`), the location banner | |
+
+**Per-line parameters.** The HBlank handler `0x08011F88` copies entry
+VCOUNT+1 of the 16-byte table at `[View+0x6C]` ({PA|PB, PC|PD, X, Y}) to the BG2
+registers. `0x08012520` fills entries 56..159 every frame; entries 0..55 hold a
+filler that the opaque sky hides. For line L, k = L-56:
+
+```
+A = [0x086D82DC + 4k]   B = [0x086D855C + 4k]     (ROM tables, 160 entries: lines 56..215;
+                                                   A = 425984/(3k+104), B = 1024k/104, rounded down)
+pa = (m0*A) >> 14       pc = (m1*A) >> 14
+x  = ((((U*B) >> 10) + ip) * A >> 14) - 120*pa
+y  = ((((V*B) >> 10) + lr) * A >> 14) - 120*pc
+```
+
+m0, m1, U, V, ip, lr are loop invariants computed from the camera. A
+`[[hook_before]]` at `0x08012612` (before the loop) records them from r12, r14
+and sp+0x14..0x20; it only reads. The view computes lines 160..199 with the
+same formula and the tables' next entries, with 64-bit products: the game's
+32-bit products wrap, which for its own lines only moves the reference point by
+1024 px (the same texel of the wrapping map), but U*B and V*B start to wrap
+below the native screen. The host check (`--ws-debug`) compares the model
+with the hardware snapshots of lines 56..159 every shot: 0 lines differ
+(pa/pc exactly, x/y modulo 1024 px) in every frame checked.
+
+**The view.** The native screen at (40,40), region (-40,-40)-(280,200):
+
+- BG2: lines 0..159 from the hardware snapshots; lines 160..199 from the model;
+  lines above the screen (sky) repeat line 0's filler. Each line is affine, so
+  x outside 0..239 is exact.
+- BG1: outside the native screen the panorama (world cell cx shows panorama
+  column cx & 63; rows above the sky repeat row 0, the top of the sky).
+- BG0: rows that are full-width bands natively (the haze) extend their edge
+  cells; the minimap (its non-band cells) moves to the top-right corner with
+  `anchor()`'s rule, in whole cells, and the old cells become blank. Here
+  `bg_entry` also answers inside the native screen. The analysis is redone when
+  the layer's map entries change; when the minimap's entries change the map
+  generation is bumped (the N64 renderer re-queries all cells).
+- Sprites: the field rules (`ws_m1_sprites()`: world objects keep their place,
+  screen-space objects such as the banner are anchored), except the player and
+  its shadow, which stay where the ground puts them, and the minimap markers,
+  which move with the minimap.
+
+**What the game streams and culls** (while the view is shown; render state only):
+
+- `0x0801204E` copies the ground map into the VRAM ring for the camera rect
+  View+0x0C..0x18, which `0x08005DD4` makes the bounding box of the native
+  screen's ground. Its four loads (`0x0801205A`, `68`, `72`, `7C`) get the rect
+  widened to the wide view's far corners (points 256 px ahead, 165 px to the
+  side), kept inside the decoded 3x3 blocks around the camera.
+- The landmarks' isVisible `0x08012CEE`: the camera-rect test (loads at
+  `0x08012D06`, `0C`, `14`, `1A`) uses the same widened rect, and the projected
+  position tests (constants 240 and 160) get the position moved into the
+  native range by `[[override_reg]]` (a new recompiler hook: before a PC,
+  rN = func(registers)) when it lies in the wide view.
+- `0x08016BD4` (vt `0x08025ADC`): its ROM rect {-7,-7,240,160} grows 40 px on
+  every side.
+
+**Verification.**
+
+- Native runs (view hooks inactive) are identical to the build without them:
+  RAM, frames, audio and the video state (I/O, VRAM, OAM, line registers) at
+  every checkpoint of the world-map route, and RAM, frames and audio over the
+  100,000-frame field route.
+- The N64 renderer equals `ppu_soft_render_view` with the same hooks in all
+  compared world-map frames (11, including a landmark in the right margin),
+  native area and margins.
+
+**Reaching it.** No story route was found; the game's hidden debug menu warps
+there. Pokes (host `--poke`, N64 test script `poke`): frame 1995
+`0203DF44=2` (title menu choice 2 = debug menu), start at 2000, frame 2200
+`020344A0=2/4` and `020344AC=B0/4` (MAP TEST, record 176 = zone 6 area 0x63,
+"THE WORLD"), A at 2210. The map records are the 0x38-byte table at ROM
+`0x08409368`.
+
+**Limitations.**
+
+- Flying diagonally near a 256 px block edge, the outermost far corners of the
+  wide view can show stale ground for a few frames: the game decodes only the
+  3x3 blocks around the camera.
+- Landmarks were seen only from a debug warp (no story flags set).
+- Sprites of classes not seen in testing follow the field rules.

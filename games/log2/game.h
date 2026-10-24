@@ -37,6 +37,14 @@
 #define GAME_IRQ_ORDER 0x0400, 0x0001, 0x0002, 0x0004, 0x0008, 0x0010, 0x0020, \
                        0x0040, 0x0080, 0x0100, 0x0200, 0x0800, 0x1000
 
+/* The mode-1 world map's HBlank handler (Thumb 0x08011F88, native body in
+ * games/log2/native.c) is served in the scheduler without the dispatcher
+ * round trip (runtime/io.c).  That needs the game never to wait for HBlank
+ * itself: its only Halt (SWI 2, 0x08020D6E) is the flag wait loop
+ * 0x08020D40, whose callers wait for VBlank (1) or DMA2 (0x400). */
+#define GAME_HBLANK_NATIVE    0x08011F89u
+#define GAME_HBLANK_NATIVE_FN native_m1_hblank
+
 /* hand-written IWRAM routines replaced by runtime/native.c ([[native]]) */
 #define GAME_NATIVE_MIX_VOICE 0x03000520u
 #define GAME_NATIVE_CLIP      0x03000704u

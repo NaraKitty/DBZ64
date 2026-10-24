@@ -13,6 +13,9 @@
  *   shot F            dump the framebuffer (FBDUMP hex via debugf) at frame F
  *   keys A-B:KEY+KEY  hold GBA keys during frames A..B (a b select start right
  *                     left up down r l), same syntax as the host harness
+ *   poke F ADDR VAL [SIZE]  write guest memory (hex ADDR/VAL, SIZE 1/2/4 bytes,
+ *                     default 1) at VBlank of frame F, like the host's --poke
+ *   wsoff             native 240x160 view everywhere (ws_enabled = 0)
  */
 #include <libdragon.h>
 #include <stdarg.h>
@@ -67,6 +70,8 @@ static struct {
     int shots[64], nshots;
     keyspan_t spans[2048];
     int nspans, spans_dropped;
+    struct { int frame, size; uint32_t addr, val; } pokes[32];
+    int npokes;
 } test;
 
 static uint16_t parse_keys(const char *s) {
@@ -117,6 +122,14 @@ static void load_test_script(void) {
         } else if (sscanf(line, "shot %d", &a) == 1) {
             if (test.nshots < 64)
                 test.shots[test.nshots++] = a;
+        } else if (!strncmp(line, "wsoff", 5)) {
+            extern int ws_enabled;
+            ws_enabled = 0;
+        } else if (!strncmp(line, "poke ", 5)) {
+            unsigned long ad, v;
+            int sz = 1;
+            if (sscanf(line, "poke %d %lx %lx %d", &a, &ad, &v, &sz) >= 3 && test.npokes < 32)
+                test.pokes[test.npokes++] = (typeof(test.pokes[0])){ a, sz, (uint32_t)ad, (uint32_t)v };
         } else if (sscanf(line, "keys %d-%d:%95s", &a, &b, k) == 3) {
             if (test.nspans < 2048)
                 test.spans[test.nspans++] = (keyspan_t){ a, b, parse_keys(k) };
@@ -354,7 +367,8 @@ static void draw_frame_cpu(surface_t *disp) {
 
 _Static_assert(sizeof(gba_view_t) == sizeof(ws_view_t) &&
                offsetof(gba_view_t, bg_entry) == offsetof(ws_view_t, bg_entry) &&
-               offsetof(gba_view_t, obj_pos) == offsetof(ws_view_t, obj_pos),
+               offsetof(gba_view_t, obj_pos) == offsetof(ws_view_t, obj_pos) &&
+               offsetof(gba_view_t, bg_affine) == offsetof(ws_view_t, bg_affine),
                "ws_view_t must have the layout of gba_view_t");
 
 /* The 320x240 field view (docs/WIDESCREEN.md), asked for every frame even
@@ -520,6 +534,12 @@ void plat_frame(void) {
             if (frame >= test.spans[i].from && frame <= test.spans[i].to)
                 pressed |= test.spans[i].keys;
         keyinput = (uint16_t)(0x3FF & ~pressed);
+        for (int i = 0; i < test.npokes; i++)
+            if (test.pokes[i].frame == frame) {
+                if (test.pokes[i].size == 4) wr32(test.pokes[i].addr, test.pokes[i].val);
+                else if (test.pokes[i].size == 2) wr16(test.pokes[i].addr, test.pokes[i].val);
+                else wr8(test.pokes[i].addr, test.pokes[i].val);
+            }
         if (test.slow_us)
             wait_ticks(TICKS_FROM_US(test.slow_us));
         if (test.stall_us && frame == test.stall_frame)
@@ -613,10 +633,11 @@ void plat_frame(void) {
 #ifdef USE_RDP
         const gba_render_stats_t *rs = gba_render_get_stats();
         debugf("f%d: render us total %lu wait %lu track %lu bg %lu obj %lu raster %lu; "
-               "rects %lu obj %lu field %d\n", frame,
+               "rects %lu obj %lu field %d aff %lu cells %lu us\n", frame,
                (unsigned long)rs->us_total, (unsigned long)rs->us_wait, (unsigned long)rs->us_track,
                (unsigned long)rs->us_bg, (unsigned long)rs->us_obj, (unsigned long)rs->us_raster,
-               (unsigned long)rs->rects, (unsigned long)rs->obj_drawn, ws_field_view_active());
+               (unsigned long)rs->rects, (unsigned long)rs->obj_drawn, ws_field_view_active(),
+               (unsigned long)rs->aff_cells, (unsigned long)rs->us_aff_update);
 #endif
         acc_game = acc_wait = acc_draw = 0;
         t_last = now;
