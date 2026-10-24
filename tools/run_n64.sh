@@ -7,6 +7,7 @@
 #   BD   build directory name under /d/dbz-n64/build (default n64t)
 #   WSLREPO  repository path as seen from WSL (default ~/dbzn64; use a
 #            worktree like /mnt/d/dbz-n64/wt-lead to build committed code)
+#   ARES_ARGS extra ares options, e.g. "--setting Boot/Prefer=PAL"
 #   GENDIR   generated C directory (WSL path, default /mnt/d/dbz-n64/gen/c,
 #            /mnt/d/dbz-n64/$GAME/gen/c for games other than log2)
 # Output: /d/dbz-n64/runs/NAME/{ares.log,shot_fNNNNN.png} (other games:
@@ -32,7 +33,7 @@ rm -f /d/dbz-n64/build/$BD/filesystem/test.txt
 cd "/d/Games/ARES N64 EMULATOR"
 # Input/Defocus=Allow: ares otherwise pauses when its window loses focus,
 # which stalls test runs started in the background
-./ares.exe --settings-file 'D:\dbz-n64\scratch\n64platform\ares_settings.bml' --setting Input/Defocus=Allow \
+./ares.exe --settings-file 'D:\dbz-n64\scratch\n64platform\ares_settings.bml' --setting Input/Defocus=Allow $ARES_ARGS \
     --system "Nintendo 64" --no-file-prompt "D:\\dbz-n64\\build\\${BD}\\dbz_test.z64" > "$RUN/ares.log" 2>&1 &
 ARES=$!
 # ares sometimes ignores the exit request after framebuffer dumps: stop it

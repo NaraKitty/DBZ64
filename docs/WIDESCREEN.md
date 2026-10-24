@@ -120,14 +120,22 @@ inside, by the rule of that edge (`margin_src`):
 | blank | the all-zero tile (backdrop or lower layers show) |
 | mirror | the k-th cell inside, with the flip bit of that axis toggled |
 | repeat P | the cell P-1-(k mod P) inside |
+| zero | entry 0 while still inside the map, blank past it |
 
 Mirroring is seamless at the edge by construction, and keeps whatever the
 edge is made of (trees, rock, sand, water). Corner cells apply both axes.
 
-**Map edges** (factor-1.0 axes) are decided once per map from the authored
-entries of a strip along each edge, as deep as the margin the view can show
-there plus one cell for shake (`decide_edge`, up to 64 positions along the
-edge, all factor-1.0 layers together):
+A layer's chunk grid can end inside the map (480x328 map `0x084EB64C`: BG2's
+grid stops at y 256). The game's loader (`0x0800532E`) fills such quadrants
+with the all-zero chunk at `0x081D9CB8`, so the GBA shows entry 0 there: that
+side gets the **zero** rule, and the layer does not vote on the map edge.
+
+**Map edges** (factor-1.0 axes the view is larger than: x when W < 320, y
+when H < 240; other edges stay blank, as only shake can show them) are
+decided per map from the authored entries of a strip along each edge, as
+deep as the margin the view can show there plus one cell for shake
+(`decide_edge`, up to 64 positions along the edge, all factor-1.0 layers
+whose clip ends at the map edge, together):
 - **blank** when the outermost cells, or the whole strip, are at least half
   dark: every layer's tile is transparent or black (`tile_dark`, from VRAM
   and the palette). Rooms keep a black border inside the map, so interiors
@@ -137,9 +145,12 @@ edge, all factor-1.0 layers together):
   regular forest edge).
 - **mirror** otherwise.
 
-The decision is taken again 30 frames into the map, in case the tiles were
-still loading; if it changes, `ws_map_generation()` moves so the N64
-renderer drops cached margins.
+A decision reads up to 64x24 cells per layer and may decode chunks from
+ROM, a few ms of N64 CPU, so `update_edges` takes one edge per frame when a
+map comes up and again 30 frames later, in case the tiles were still
+loading. A round trip to the pause menu keeps them (they are keyed by the
+map, not by the field view). Whenever an edge changes, `ws_map_generation()`
+moves so the N64 renderer drops cached margins.
 
 **Parallax layers** (factor != 1.0) are mirrored past their chunk grid on
 those axes, so a backdrop one chunk wide reaches the view edges.

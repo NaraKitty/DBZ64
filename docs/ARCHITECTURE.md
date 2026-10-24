@@ -186,8 +186,18 @@ On that heaviest stretch, the same frame started this round of work at
 10.5 + 7.5 ms, which missed 60 fps. Mid-game cartridge reads went from 76
 to 0 over the scripted playthrough.
 
-When a frame runs over anyway, the platform skips drawing (at most two
-frames in a row) instead of slowing the game down.
+**Pacing** (`platform/n64/main.c`, `frame_pace`): the game runs on its own
+real-time schedule, one GBA frame per 267.52 audio samples at the AI's
+exact rate, and video never holds it up. Ahead of schedule it waits. More
+than half a frame behind, the frame is not drawn (at most four in a row).
+While the RDP is still busy with the previous frame or no framebuffer is
+free, it waits only as long as this frame had to spare, then leaves the
+frame undrawn. So a scene whose RDP work runs long (blend frames on real
+hardware) loses drawn frames, while game speed, music and sound effects
+stay steady. The CPU timer and the AI's clock come from different crystals,
+so `pace_audio` nudges the schedule every frame (at most 1/32 of a frame)
+toward keeping all but one of libdragon's audio buffers full; after a stall
+the queue is refilled with silence at once.
 
 **Memory:**
 - Code: 1.66 MB of MIPS from 67.5k guest instructions, with TLB-mapped memory

@@ -27,7 +27,11 @@ emulator.
   world: the extra margins are drawn from the game's own map data. Enemies,
   projectiles and NPCs live in the wider view because the game's culling is
   widened at every check. The HUD and dialogue boxes are moved out to the
-  screen edges. Title, menu and status screens stay pixel-exact and centred.
+  screen edges, and location banners run the full width. Rooms smaller than
+  the screen are continued past their edges with their own trees, rock and
+  sand (interiors keep their black surround). The pause menu and file select
+  fill the screen with their starfield. Title and logo screens stay
+  pixel-exact and centred.
 - **Hardware-accelerated graphics.** The GBA's tile and sprite engine is
   rebuilt on the N64's RDP. It covers background layers, sprites, flips,
   alpha blending and brightness effects. Its output is pixel-identical to a
@@ -40,7 +44,9 @@ emulator.
 - **Built for real consoles.**
   - Guest memory is mapped through the VR4300's TLB, so a guest memory access
     is a single load or store.
-  - Frame skip keeps the game speed and music steady if a frame runs long.
+  - The game is paced by the audio chip's clock and never waits for video:
+    if drawing runs long, frames are dropped on screen while game speed,
+    music and sound effects stay steady (at 60 Hz and at 50 Hz).
   - At boot, a self-test checks the CPU features the port relies on and names
     any that misbehave instead of showing a black screen.
 - **Verified against a reference.**

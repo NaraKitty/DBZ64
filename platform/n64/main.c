@@ -181,6 +181,9 @@ uint16_t plat_keyinput(void) {
 
 /* ------------------------------------------------------------ audio */
 
+/* the AI rate asked of libdragon (it gets VI clock / dacrate, see ai_frame_ticks) */
+#define AUDIO_HZ 16004
+
 /* ring of stereo frames; blocks are 16 frames and never straddle the end */
 #define ABUF_FRAMES 4096u
 static int16_t abuf[ABUF_FRAMES * 2];
@@ -414,34 +417,55 @@ static uint64_t t_frame_end, acc_game, acc_wait, acc_draw;
  *   - more than half a frame behind, the frame is not drawn and the next
  *     game frame runs at once (at most MAX_SKIP in a row for this reason);
  *   - while the RDP is still drawing the previous frame or no framebuffer
- *     is free (50 Hz display, slow scenes), the frame is not drawn either,
- *     instead of waiting.
+ *     is free (50 Hz display, slow scenes), it waits only as long as the
+ *     time this frame had to spare (what frame_pace just waited), then
+ *     leaves the frame undrawn.
  * The VI keeps showing the last frame drawn, so heavy scenes lose frames
- * on screen while game speed, music and sound effects stay steady. */
+ * on screen while game speed, music and sound effects stay steady.
+ *
+ * The schedule follows the AI itself.  The nominal period uses the AI's
+ * exact rate (VI clock / dacrate; audio_get_frequency() is truncated), and
+ * since the CPU timer and the VI clock come from different crystals, the
+ * deadline is nudged every frame by how far the queued audio (libdragon's
+ * full buffers plus our ring) is from its target, all but one buffer full:
+ * the game runs up to 1/32 faster while the queue is low and slower while
+ * it backs up.  After a stall the queue is refilled with silence at once. */
 #define GBA_SAMPLES_PER_FRAME_X100 26752u
 #define MAX_SKIP 4
 static uint64_t frame_ticks;   /* real time per game frame */
 static uint64_t deadline;      /* real time at which this frame is due */
+static uint64_t pace_slack;    /* how long frame_pace waited for the deadline */
 static int skip_run;
 static uint32_t stat_skipped, stat_skip_late, stat_skip_busy;
 static uint64_t t_submitted;   /* test 'rdpslow': when the last frame was queued */
 
+/* libdragon audio.c: the AI runs at clockrate / dacrate */
+static uint64_t ai_frame_ticks(void) {
+    uint64_t clockrate = get_tv_type() == TV_PAL ? 49656530u :
+                         get_tv_type() == TV_MPAL ? 48628322u : 48681818u;
+    uint64_t dacrate = ((2 * clockrate / AUDIO_HZ) + 1) / 2;
+    return (uint64_t)TICKS_PER_SECOND * GBA_SAMPLES_PER_FRAME_X100 * dacrate / (100u * clockrate);
+}
+
 /* keep the schedule; 1 = too far behind to draw this frame */
 __attribute__((unused)) static int frame_pace(uint64_t now) {
     if (!frame_ticks)
-        frame_ticks = (uint64_t)TICKS_PER_SECOND * GBA_SAMPLES_PER_FRAME_X100 /
-                      (100u * (uint64_t)audio_get_frequency());
+        frame_ticks = ai_frame_ticks();
     deadline = deadline ? deadline + frame_ticks : now;
     int64_t late = (int64_t)(now - deadline);
     if (late > (int64_t)(4 * frame_ticks)) {
-        /* a long stall (loading): don't try to catch up with it */
+        /* a long stall (loading): don't try to catch up with it, and give
+         * the audio its headroom back */
         deadline = now;
         late = 0;
+        while (audio_get_queued_buffers() < audio_get_num_buffers() - 1)
+            audio_write_silence();
     } else if (late < -(int64_t)frame_ticks) {
         /* never bank more than one frame of credit */
         deadline = now + frame_ticks;
         late = -(int64_t)frame_ticks;
     }
+    pace_slack = late < 0 ? (uint64_t)-late : 0;
     if (late < 0)
         wait_ticks((unsigned long)-late);
     if (late > (int64_t)(frame_ticks / 2) && skip_run < MAX_SKIP) {
@@ -450,6 +474,18 @@ __attribute__((unused)) static int frame_pace(uint64_t now) {
     }
     skip_run = 0;
     return 0;
+}
+
+/* after audio_flush: nudge the schedule toward the AI's consumption */
+static void pace_audio(void) {
+    if (!deadline || !frame_ticks)
+        return;
+    int64_t buf = audio_get_buffer_length();
+    int64_t level = audio_get_queued_buffers() * buf + (int64_t)(a_wr - a_rd);
+    int64_t target = (audio_get_num_buffers() - 1) * buf;
+    int64_t adj = (level - target) * (int64_t)frame_ticks / (32 * buf);
+    int64_t lim = (int64_t)frame_ticks / 32;
+    deadline += (uint64_t)(adj > lim ? lim : adj < -lim ? -lim : adj);
 }
 
 /* the RDP is still drawing the previous frame (or, in a 'rdpslow' test,
@@ -503,12 +539,19 @@ void plat_frame(void) {
         drawn = 1;
     } else {
         surface_t *disp = NULL;
-        if (frame_pace(t1))
+        if (frame_pace(t1)) {
             stat_skip_late++;
-        else if (video_busy())
-            stat_skip_busy++;
-        else
-            disp = display_try_get();
+        } else {
+            /* the RDP may be about to finish the previous frame (or a
+             * buffer about to come free): wait for it as long as this frame
+             * had to spare, so a scene needing a little more than a frame
+             * drops few frames; past that the late path catches up */
+            uint64_t give_up = get_ticks() + (pace_slack < frame_ticks / 2 ? pace_slack : frame_ticks / 2);
+            while ((video_busy() || !(disp = display_try_get())) && get_ticks() < give_up)
+                ;
+            if (!disp)
+                stat_skip_busy++;
+        }
         t2 = get_ticks();
         if (disp) {
             draw_frame_rdp(disp, 0);
@@ -537,6 +580,7 @@ void plat_frame(void) {
     acc_draw += t3 - t2;
 
     audio_flush();
+    pace_audio();
     flush_save();
 
     if ((frame % 120) == 0) {
@@ -545,7 +589,7 @@ void plat_frame(void) {
                (double)TICKS_TO_US(now - t_last) / 120000.0, (double)TICKS_TO_US(acc_game) / 120000.0,
                (double)TICKS_TO_US(acc_wait) / 120000.0, (double)TICKS_TO_US(acc_draw) / 120000.0,
                (unsigned long)rom_cache_stats.misses);
-        debugf("f%d: audio blocks %lu dropped %lu queued %d; frames skipped %lu (late %lu, rdp busy %lu)\n",
+        debugf("f%d: audio blocks %lu dropped %lu queued %d; frames skipped %lu (late %lu, video busy %lu)\n",
                frame, (unsigned long)stat_audio_blocks, (unsigned long)stat_audio_drops,
                (int)(a_wr - a_rd), (unsigned long)stat_skipped, (unsigned long)stat_skip_late,
                (unsigned long)stat_skip_busy);
@@ -646,7 +690,7 @@ int main(void) {
     gba_render_init();
 #endif
     joypad_init();
-    audio_init(16004, AUDIO_INIT_LATENCY_MS(100));
+    audio_init(AUDIO_HZ, AUDIO_INIT_LATENCY_MS(100));
     if (dfs_init(DFS_DEFAULT_LOCATION) != DFS_ESUCCESS)
         plat_fatal("The ROM's filesystem (with the GBA game data) was not found. "
                    "Rebuild the ROM with your own GBA dump.");

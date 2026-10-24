@@ -338,9 +338,11 @@ static const uint16_t *decoded_chunk(uint32_t desc) {
 enum { LAYER_NONE, LAYER_FIELD, LAYER_WRAP };
 
 /* How a margin past one edge of a layer's content is filled (see "margins"
- * below): left blank, mirrored at the edge, or continued with the edge
- * strip's period (in tiles). */
-enum { EDGE_BLANK, EDGE_MIRROR, EDGE_REPEAT };
+ * below): left blank, mirrored at the edge, continued with the edge strip's
+ * period (in tiles), or, past a chunk grid that ends inside the map, entry
+ * 0 inside the map (the game's loader fills such quadrants with a zero
+ * chunk) and blank beyond. */
+enum { EDGE_BLANK, EDGE_MIRROR, EDGE_REPEAT, EDGE_ZERO };
 typedef struct {
     int mode, period;
 } edge_t;
@@ -352,6 +354,8 @@ typedef struct {
     int cols, rows;
     int f1x, f1y;                /* factor-1.0 (map) axes */
     int cx0, cy0, cx1, cy1;      /* clip rect, layer pixels */
+    int mx0, my0, mx1, my1;      /* the map rect, layer pixels (factor-1.0 axes) */
+    uint8_t mbx[2], mby[2];      /* that clip side is the map's edge (not the grid's) */
     edge_t ex[2], ey[2];         /* margin fill left/right, top/bottom */
     int h, v;                    /* signed scroll of the shown frame */
     int has_blank;
@@ -416,19 +420,24 @@ static int setup_layer(int bg, uint32_t obj, uint32_t vt) {
     l->cy0 = 0; l->cy1 = rows * 256;
     l->f1x = fx == 1024;
     l->f1y = fy == 1024;
+    l->mx0 = ox >> 10; l->mx1 = (ox >> 10) + map_w();
+    l->my0 = oy >> 10; l->my1 = (oy >> 10) + map_h();
     if (l->f1x) {
-        l->cx0 = imax(l->cx0, ox >> 10);
-        l->cx1 = imin(l->cx1, (ox >> 10) + map_w());
+        l->cx0 = imax(l->cx0, l->mx0);
+        l->cx1 = imin(l->cx1, l->mx1);
     }
     if (l->f1y) {
-        l->cy0 = imax(l->cy0, oy >> 10);
-        l->cy1 = imin(l->cy1, (oy >> 10) + map_h());
+        l->cy0 = imax(l->cy0, l->my0);
+        l->cy1 = imin(l->cy1, l->my1);
     }
+    l->mbx[0] = l->cx0 == l->mx0; l->mbx[1] = l->cx1 == l->mx1;
+    l->mby[0] = l->cy0 == l->my0; l->mby[1] = l->cy1 == l->my1;
 #ifdef WS_TEST_NARROW
     /* margin fill test (host only): clip the map to the native screen so
      * the filled margins can be compared with the real map around it */
     if (l->f1x) { l->cx0 = (l->h + 7) & ~7; l->cx1 = (l->h + 240) & ~7; }
     if (l->f1y) { l->cy0 = (l->v + 7) & ~7; l->cy1 = (l->v + 160) & ~7; }
+    l->mbx[0] = l->mbx[1] = l->mby[0] = l->mby[1] = 1;
 #endif
     /* parallax axes are mirrored past their chunk grid; map axes get the
      * map's edge rule (set by update_edges) */
@@ -507,13 +516,17 @@ static int authored_entry(layer_t *l, int wx, int wy, uint16_t *e) {
 }
 
 /* Source of a margin cell at p (px, 8-aligned relative to the edges) outside
- * the content [a,b) of one axis, by the rule of the edge it lies past.
- * Returns 0 for a blank cell; *mirrored toggles for a mirrored source. */
-static int margin_src(int p, int a, int b, const edge_t ed[2], int *src, int *mirrored) {
+ * the content [a,b) of one axis, by the rule of the edge it lies past
+ * ([mlo,mhi) is the map on that axis).  Returns 0 for a blank cell, 2 for
+ * entry 0, 1 for a source cell in *src; *mirrored toggles for a mirrored
+ * source. */
+static int margin_src(int p, int a, int b, int mlo, int mhi, const edge_t ed[2], int *src, int *mirrored) {
     int lo = p < a;
     const edge_t *r = &ed[lo ? 0 : 1];
     int k = lo ? (a - 8 - p) >> 3 : (p - b) >> 3;      /* 0 = next to the edge */
     int t;                                             /* tile inside, from the edge */
+    if (r->mode == EDGE_ZERO)
+        return p >= mlo && p < mhi ? 2 : 0;
     if ((a & 7) || (b & 7))
         return 0;
     if (r->mode == EDGE_MIRROR) {
@@ -541,11 +554,23 @@ static int ws_bg_entry(int bg, int cx, int cy, uint16_t *e) {
     if (wx + 8 > l->h && wx < l->h + 240 && wy + 8 > l->v && wy < l->v + 160)
         return 0;
     /* past the content: the margin rules of that edge */
-    int hf = 0, vf = 0;
-    if ((wx + 8 <= l->cx0 || wx >= l->cx1) && !margin_src(wx, l->cx0, l->cx1, l->ex, &wx, &hf))
-        goto blank;
-    if ((wy + 8 <= l->cy0 || wy >= l->cy1) && !margin_src(wy, l->cy0, l->cy1, l->ey, &wy, &vf))
-        goto blank;
+    int hf = 0, vf = 0, r;
+    if (wx + 8 <= l->cx0 || wx >= l->cx1) {
+        if (!(r = margin_src(wx, l->cx0, l->cx1, l->mx0, l->mx1, l->ex, &wx, &hf)))
+            goto blank;
+        if (r == 2) {
+            *e = 0;
+            return 1;
+        }
+    }
+    if (wy + 8 <= l->cy0 || wy >= l->cy1) {
+        if (!(r = margin_src(wy, l->cy0, l->cy1, l->my0, l->my1, l->ey, &wy, &vf)))
+            goto blank;
+        if (r == 2) {
+            *e = 0;
+            return 1;
+        }
+    }
     if (authored_entry(l, wx, wy, e)) {
         *e ^= (uint16_t)((hf ? 0x400 : 0) | (vf ? 0x800 : 0));
         return 1;
@@ -576,7 +601,8 @@ blank:
  * loading; the N64 renderer's caches follow ws_map_generation(). */
 
 static edge_t map_edge[4];          /* left, right, top, bottom */
-static uint32_t edge_age;           /* frames since the map edges were decided */
+static uint32_t edges_key;          /* map they were decided for (kept across menus) */
+static uint32_t edge_age;           /* frames since that map came up */
 
 #define STRIP_ROWS 64
 #define STRIP_COLS 24
@@ -618,6 +644,8 @@ static edge_t decide_edge(int axis, int side, int depth) {
         layer_t *l = &lay[bg];
         if (l->type != LAYER_FIELD || !(axis ? l->f1y : l->f1x))
             continue;
+        if (!(axis ? l->mby[side] : l->mbx[side]))
+            continue;                       /* its grid ends inside the map */
         if ((l->cx0 | l->cx1 | l->cy0 | l->cy1) & 7)
             continue;
         bgs[nl++] = bg;
@@ -681,30 +709,49 @@ static edge_t decide_edge(int axis, int side, int depth) {
     return r;
 }
 
-/* decide the map's edges (every field frame: cheap unless due) */
-static void update_edges(int W, int H, int new_map) {
-    if (new_map)
+/* decide edge i (0 left, 1 right, 2 top, 3 bottom) of a W x H map; an axis
+ * the view does not exceed keeps blank margins (only shake shows them) */
+static void decide_map_edge(int i, int W, int H) {
+    int axis = i >> 1, side = i & 1;
+    int m = axis ? (H < WS_H ? (WS_H - H + 1) / 2 : -1) : (W < WS_W ? (WS_W - W + 1) / 2 : -1);
+    edge_t e = { EDGE_BLANK, 0 };
+    if (m >= 0)
+        e = decide_edge(axis, side, (m + 7) / 8 + 1);  /* margin depth + one cell for shake */
+    if (memcmp(&e, &map_edge[i], sizeof e)) {
+        map_edge[i] = e;
+        map_generation++;              /* the margins change: renderer caches */
+    }
+}
+
+/* the map's edge rules, every field frame.  The decisions cost a few ms
+ * each (strip reads, chunk decodes), so one edge is decided per frame when
+ * the map comes up and again 30 frames later in case the tiles were still
+ * loading; returning from a menu to the same map keeps them. */
+static void update_edges(int W, int H, uint32_t key, int all_now) {
+    if (key != edges_key) {
+        edges_key = key;
         edge_age = 0;
-    if (edge_age == 0 || edge_age == 30) {
-        /* margin depth in tiles past each edge, plus one for shake */
-        int mx = W < WS_W ? (WS_W - W + 1) / 2 : 0, my = H < WS_H ? (WS_H - H + 1) / 2 : 0;
-        int dx = (mx + 7) / 8 + 1, dy = (my + 7) / 8 + 1;
-        edge_t e[4] = {
-            decide_edge(0, 0, dx), decide_edge(0, 1, dx),
-            decide_edge(1, 0, dy), decide_edge(1, 1, dy),
-        };
-        if (edge_age && memcmp(e, map_edge, sizeof e))
-            map_generation++;          /* the margins change: renderer caches */
-        memcpy(map_edge, e, sizeof e);
+        memset(map_edge, 0, sizeof map_edge);
+    }
+    if (all_now) {
+        for (int i = 0; i < 4; i++)
+            decide_map_edge(i, W, H);
+    } else if (edge_age < 4 || (edge_age >= 30 && edge_age < 34)) {
+        decide_map_edge((int)(edge_age & 3), W, H);
     }
     if (edge_age < 1000)
         edge_age++;
+    static const edge_t zero = { EDGE_ZERO, 0 };
     for (int bg = 0; bg < 4; bg++) {
         layer_t *l = &lay[bg];
         if (l->type != LAYER_FIELD)
             continue;
-        if (l->f1x) { l->ex[0] = map_edge[0]; l->ex[1] = map_edge[1]; }
-        if (l->f1y) { l->ey[0] = map_edge[2]; l->ey[1] = map_edge[3]; }
+        for (int s = 0; s < 2; s++) {
+            if (l->f1x)
+                l->ex[s] = l->mbx[s] ? map_edge[s] : zero;
+            if (l->f1y)
+                l->ey[s] = l->mby[s] ? map_edge[2 + s] : zero;
+        }
     }
 }
 
@@ -1167,6 +1214,12 @@ static int menu_on;
 static uint16_t menu_blank[4];
 static int menu_has_blank[4];
 static uint32_t menu_sig;
+/* per page layer and native tile row: the rule tile continuing it past the
+ * left / right edge (decided when the edge columns change, not per cell) */
+static struct {
+    uint8_t ok;
+    uint16_t l, r;
+} menu_row[3][20];
 
 static uint16_t hw_entry(int bg, int px, int py);
 
@@ -1201,6 +1254,8 @@ static void bg_tile_rows(int bg, uint32_t e, int *plain, int *opaque, uint64_t *
             else if (idx != first)
                 *plain = 0;
         }
+        if (!*plain && *opaque)
+            return;
         *colours ^= (uint64_t)first << (8 * y);
     }
 }
@@ -1217,14 +1272,21 @@ static int menu_regs(void) {
     return 1;
 }
 
-/* the starfield fills its ring: no empty cell */
+/* the starfield fills its ring: no empty cell (a tile with any non-zero
+ * byte; a starfield tile has one in its first word) */
 static int menu_starfield(void) {
+    uint32_t cnt = io16(REG_BG0CNT + 6);
+    uint32_t bytes = (cnt & 0x80) ? 64 : 32, base = ((cnt >> 2) & 3) * 0x4000u;
     for (int ty = 0; ty < 32; ty++)
         for (int tx = 0; tx < 32; tx++) {
-            int plain, opaque;
-            uint64_t c;
-            bg_tile_rows(3, hw_entry(3, tx * 8, ty * 8), &plain, &opaque, &c);
-            if (!opaque)
+            uint32_t a = base + (hw_entry(3, tx * 8, ty * 8) & 0x3FF) * bytes;
+            if (a + bytes > 0x10000)
+                return 0;
+            const uint32_t *w = gba_mem.vram + a / 4;
+            uint32_t k = 0;
+            while (k < bytes / 4 && !w[k])
+                k++;
+            if (k == bytes / 4)
                 return 0;
         }
     return 1;
@@ -1257,13 +1319,8 @@ static int menu_bg_entry(int bg, int cx, int cy, uint16_t *e) {
     int sy = (int16_t)(uint16_t)((uint32_t)cy << 3) - v;
     if (sx + 8 > 0 && sx < 240 && sy + 8 > 0 && sy < 160)
         return 0;
-    /* a rule runs across the whole frame: both edges find the same pixels
-     * (a panel that merely touches one edge is not continued) */
-    uint16_t l, r;
-    uint64_t lc, rc;
-    if (sy >= 0 && sy + 8 <= 160 && !(v & 7) && !(h & 7) &&
-        menu_rule(bg, h, v + sy, 0, &l, &lc) && menu_rule(bg, h, v + sy, 1, &r, &rc) && lc == rc) {
-        *e = sx < 0 ? l : r;
+    if (sy >= 0 && sy + 8 <= 160 && !(v & 7) && !(h & 7) && menu_row[bg][sy >> 3].ok) {
+        *e = sx < 0 ? menu_row[bg][sy >> 3].l : menu_row[bg][sy >> 3].r;
         return 1;
     }
     if (!menu_has_blank[bg])
@@ -1287,6 +1344,7 @@ static uint32_t menu_signature(void) {
 }
 
 static void update_menu(void) {
+    int was_on = menu_on;
     int on = ws_enabled && !field_on && menu_regs();
     /* the starfield check reads 64 KB: on entry, then now and then */
     if (on && (!menu_on || !(vblank_count & 63)))
@@ -1301,9 +1359,20 @@ static void update_menu(void) {
         menu_has_blank[bg] = find_blank_tile((int)((cnt >> 2) & 3), (cnt & 0x80) != 0, &menu_blank[bg]);
     }
     uint32_t sig = menu_signature();
-    if (sig != menu_sig)
-        map_generation++;
+    if (sig == menu_sig && was_on)
+        return;
     menu_sig = sig;
+    map_generation++;
+    /* a rule runs across the whole frame: both edges find the same pixels
+     * (a panel that merely touches one edge is not continued) */
+    for (int bg = 0; bg < 3; bg++) {
+        int h = io16(REG_BG0HOFS + 4 * bg) & 0x1FF, v = io16(REG_BG0HOFS + 4 * bg + 2) & 0x1FF;
+        for (int row = 0; row < 20; row++) {
+            uint64_t lc, rc;
+            menu_row[bg][row].ok = menu_rule(bg, h, v + 8 * row, 0, &menu_row[bg][row].l, &lc) &&
+                                   menu_rule(bg, h, v + 8 * row, 1, &menu_row[bg][row].r, &rc) && lc == rc;
+        }
+    }
 }
 
 /* ------------------------------------------------------------ frame */
@@ -1335,9 +1404,9 @@ void ws_frame_begin(void) {
         map_generation++;
     }
 #ifdef WS_TEST_NARROW
-    update_edges(240, 160, 1);
+    update_edges(240, 160, last_map_key, 1);
 #else
-    update_edges(W, H, new_map);
+    update_edges(W, H, last_map_key, 0);
 #endif
     view_rect(L, T, W, H, &X0, &Y0);
     OX = X0 - L;
