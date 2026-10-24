@@ -11,7 +11,7 @@
 | Game | Status |
 |---|---|
 | **Dragon Ball Z: The Legacy of Goku II** (USA) | Playable. Runs on real hardware (tested on the Analogue 3D). |
-| **Dragon Ball Z: Buu's Fury** (USA) | In progress: next on the list. |
+| **Dragon Ball Z: Buu's Fury** (USA) | In progress: plays at full speed on N64 (in ares) with the RDP renderer, in the native 240×160 view. |
 
 This is not an emulator running on the N64. Every ARM and Thumb instruction
 of the original cartridge (2,282 functions, 67,500 instructions for *Legacy of
@@ -152,7 +152,7 @@ game for the build scripts and the N64 Makefile; `tools/recomp.py` takes
 | `GAME` | Game | Dump (SHA-1) | Status |
 |---|---|---|---|
 | `log2` | The Legacy of Goku II (USA, `ALFE`) | `18e0715dec419f3501c301511530d2edcd590f8b` | complete |
-| `buu` | Buu's Fury (USA, `BG3E`) | `f1c4b07554d2a3b1ad2f325307051e775ce68087` | in progress: plays on the host build and on N64 with the CPU renderer, native 240×160 view |
+| `buu` | Buu's Fury (USA, `BG3E`) | `f1c4b07554d2a3b1ad2f325307051e775ce68087` | in progress: plays on the host build and on N64 with the RDP renderer at full speed, native 240×160 view |
 
 For Buu's Fury use `games/buu/game.toml`, `--game buu` and `GAME=buu` in the
 steps above.

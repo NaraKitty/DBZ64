@@ -48,8 +48,9 @@ adapter libraries and ARM soft-float code. What differs from LoG2:
 - The IRQ dispatcher (0x03000B6C) tests Serial and Timer3 right after DMA2.
 - EEPROM library V124 (64 Kbit, as LoG2); SWI 0x0B CpuSet in the link
   libraries; the IWRAM routines memcpy32/memset32/memcpy16/memset16 replace
-  most DMA3 copies. memcpy16, a Duff's device and the game's hottest
-  routine, is native (`games/buu/native.c`).
+  most DMA3 copies. They are native (`games/buu/native.c`), with the LZ
+  decoder, the tile copies and the field map streamer (see the natives
+  table below).
 - The sound engine, mixer and FIFO model are LoG2's (`native_mix_voice` and
   `native_clip` apply unchanged).
 - No 320×240 field view yet: `games/buu/widescreen.c` always gives the
@@ -65,14 +66,18 @@ the pictures match exactly. The rest are frames where the game writes
 during scan-out on hardware. The game state in RAM is identical apart from
 sound-mixer timing, the stack and a CPU-load meter (0x03000FEC). Saves
 match byte for byte. Option
-changes are saved to EEPROM and read back at boot. The N64 build (TLB, CPU
-renderer) runs the same script in ares with frames identical to the host's
-and keeps the save in SRAM. Game logic in ares: logos 1–2.5 ms, title
-~7 ms, story scenes 3–7.5 ms, field gameplay 5.8–6.2 ms per frame. Code is
-3.27 MB of MIPS and BSS 1.6 MB.
+changes are saved to EEPROM and read back at boot. The N64 build with the
+RDP renderer runs the same script in ares with every checked frame (55,
+from the logos to the options menu) identical to the host's, and keeps the
+save in SRAM. CPU time in ares: field play 4.5 ms game + 1.7 ms draw,
+dialogue with portraits 5.5 + 2.1 ms, the animated title 5.4 + 0.9 ms
+(measurements below). Code is 3.4 MB of MIPS and BSS 1.15 MB; the ROM
+cache gets the remaining 1.2 MB.
 
-Open: the field view; the RDP renderer for Buu's Fury (the CPU renderer
-needs ~70 ms per frame); register summaries of the ARM soft-float routines
+Open: the field view; the Mode-7 style overworld (HBlank per-line BG2
+affine) and the scenes that write MOSAIC were not reached with scripted
+input (the renderer's per-line affine and mosaic paths are checked with
+synthetic states); register summaries of the ARM soft-float routines
 (their save/restore of r4–r11 is not recognised, which widens the indirect
 call summary by r8–r11); the link-cable and wireless modes only reach
 "Waiting for a friend..." (cancel works; serial is not modelled); a game
@@ -124,16 +129,19 @@ For LoG2 (`games/log2/game.toml`):
   and halfword accesses `addr ^ 2` on the big-endian N64.
 - The PC build uses a 4 KB page table.
 - The N64 build maps guest RAM through the VR4300 TLB at the guest's own
-  addresses, so an access is one `lw`.
+  addresses, so an access is one `lw`. It keeps no page tables (512 KB): the
+  runtime's few host-pointer lookups compute the page from the region.
   - I/O, unaligned and unmapped accesses fault into a handler
     (`platform/n64/tlb.c`) that emulates them.
   - Clean VRAM is write-protected in the TLB, so the first write to a page
     marks it dirty for the renderer.
-- ROM lives on the cartridge and is paged into a 2 MB cache in 16 KB pages
-  (`platform/n64/rom_n64.c`).
+- ROM lives on the cartridge and is paged into a cache in 16 KB pages
+  (`platform/n64/rom_n64.c`): what the heap has left after code, BSS, the
+  renderer and the game stack, at most 2 MB (LoG2 2 MB, Buu's Fury 1.25 MB).
   - A miss is a PI DMA with interrupts off. The game's hot pages
     (`game.toml` `[rom] preload`, found with `tools/rom_hotset.py` from host
-    traces) are therefore loaded at boot.
+    traces) are therefore loaded at boot; at most 7/8 of the cache is
+    pinned that way.
   - Eviction is LRU-approximate.
 
 **Timing model** (`io.c`):
@@ -161,6 +169,20 @@ For LoG2 (`games/log2/game.toml`):
 | `0x03000480` | Strided 8x8 sprite-tile gather | Per-access translation overhead |
 | `0x080054A4` | Field-layer tilemap rebuild | Replaces ~256 DMAs per frame, and only writes (and dirties VRAM) when a map really changes |
 
+Buu's Fury (`games/buu/native.c`; the mixer pair at 0x03000868/0x03000A4C
+and the tile gather at 0x030004C0 are the shared ones):
+
+| Routine | What it does | Why |
+|---|---|---|
+| `0x030007FC`, `0x03000768`, `0x030007A8`, `0x03000858` | memcpy16, memcpy32, memset32, memset16 | The game's VRAM, palette and OAM uploads and most RAM copies |
+| `0x08007D98` | Field map streamer: 64 memcpy16 row copies per layer and frame | Rows already in place are skipped, so VRAM stays clean |
+| `0x03000040` | Bit-stream LZ decoder | Resources, map chunks, sprites; the animated title decodes every frame |
+| `0x03000388` | Linear bitmap to 8x8 tiles | Title animation |
+
+The copy and fill natives write VRAM through host pointers and mark it
+dirty only where the data changes; the renderer then re-checks only real
+changes.
+
 **Audio:**
 - The game's own tracker and mixer run as recompiled code, apart from the
   native routines above.
@@ -186,17 +208,44 @@ On that heaviest stretch, the same frame started this round of work at
 10.5 + 7.5 ms, which missed 60 fps. Mid-game cartridge reads went from 76
 to 0 over the scripted playthrough.
 
+Buu's Fury (native 240×160 view, RDP renderer; means of the 120-frame
+windows of each scene of the gameplay script, then a 16,600-frame stretch
+of random field play):
+
+| Scene | Game | Draw | Before this round (game + draw) |
+|---|---|---|---|
+| Logos | 2.1 ms | 0.7 ms | 2.1 + 0.7 ms |
+| Title (animated, decoded every frame) | 5.4 ms | 0.9 ms | 6.8 + 0.9 ms |
+| Story intro scenes | 4.1–4.2 ms | 1.0–2.5 ms | 4.8–5.4 + 2.0–2.9 ms |
+| Snake Way dialogue with portraits | 5.5 ms | 2.1 ms | 7.1 + 3.5 ms |
+| Snake Way field play | 4.5 ms | 1.7 ms | 5.7 + 2.5 ms |
+| Status, journal, options | 3.3 ms | 0.8 ms | 3.5 + 0.9 ms |
+| Random field play, median window | 4.5 ms | 1.5 ms | 5.7 + 2.2 ms |
+| Random field play, heaviest window | 5.6 ms | 2.0 ms | 8.9 + 2.2 ms (with ROM cache misses) |
+
+"Before" is 34d29df, whose RDP build ran out of RDRAM for the 2 MB ROM
+cache (it is measured with the cache cut to 768 KB, which then missed 930
+times in that random stretch).  The ROM cache now misses only when new
+content is first used: none during the script's field play, 14 in the
+random stretch.  LoG2 over the same round: its heaviest stretch 9.2 ->
+8.7 ms (game + draw), quiet field play unchanged.
+
 When a frame runs over anyway, the platform skips drawing (at most two
 frames in a row) instead of slowing the game down.
 
 **Memory:**
 - Code: 1.66 MB of MIPS from 67.5k guest instructions, with TLB-mapped memory
-  accesses.
-- BSS: 1.5 MB.
-- ROM page cache: 2 MB.
+  accesses (Buu's Fury: 3.4 MB).
+- BSS: 1.15 MB in both games (1.6 MB before the N64 build dropped the
+  guest page tables).
+- ROM page cache: 2 MB (Buu's Fury: 1.2 MB, what is left).
+- The game stack's top is placed at offset 0x1000 of the D-cache's 8 KB
+  index space; where it falls was worth up to 1.2 ms per frame.
 
 **Fault-emulated accesses** run at about 3 per frame in steady state: the sound
 IRQ handler's DMA register writes, which use a register-relative address.
+Buu's Fury adds 8 in field play: the field layers' scroll registers, also
+written through a register (0x08007F2E).
 
 **Verification:**
 - The host build is deterministic.
@@ -237,6 +286,13 @@ the interpreter (`runtime/interp.c`) a reference for the recompiled code:
 - Saturating additive blends (EVA+EVB > 16) use a half-intensity pass so the
   blender cannot overflow.
 - The Mode-7 layer is drawn in software.
+- Where drawing one OBJ at a time is not the GBA's OBJ layer, the OBJ pixels
+  of a rectangle are composited on the CPU with the reference renderer's
+  rules: a later OBJ with a better priority over an earlier one (its
+  transparent texels still pass their priority down), OBJ mosaic, and an
+  OBJ that blends over another OBJ.
+- BG mosaic: text BGs with mosaic are drawn in software, affine and bitmap
+  BGs apply it in their software raster.
 
 **320×240 view:**
 - On field maps, background margins come from the game's authored map chunks.
