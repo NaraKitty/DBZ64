@@ -130,12 +130,13 @@ grid stops at y 256). The game's loader (`0x0800532E`) fills such quadrants
 with the all-zero chunk at `0x081D9CB8`, so the GBA shows entry 0 there: that
 side gets the **zero** rule, and the layer does not vote on the map edge.
 
-**Map edges** (factor-1.0 axes the view is larger than: x when W < 320, y
-when H < 240; other edges stay blank, as only shake can show them) are
-decided per map from the authored entries of a strip along each edge, as
-deep as the margin the view can show there plus one cell for shake
-(`decide_edge`, up to 64 positions along the edge, all factor-1.0 layers
-whose clip ends at the map edge, together):
+**Map edges** (factor-1.0 axes) are decided per map from the authored
+entries of a strip along each edge, as deep as the margin the view can show
+there plus one cell for shake (`decide_edge`, up to 64 positions along the
+edge, all factor-1.0 layers whose clip ends at the map edge, together). On
+an axis the view does not exceed (x when W >= 320, y when H >= 240) only
+shake can show a margin: the strip is one cell deep and sampled at 16
+positions.
 - **blank** when the outermost cells, or the whole strip, are at least half
   dark: every layer's tile is transparent or black (`tile_dark`, from VRAM
   and the palette). Rooms keep a black border inside the map, so interiors

@@ -654,7 +654,10 @@ static edge_t decide_edge(int axis, int side, int depth) {
     }
     if (!nl || depth <= 0 || along <= 0)
         return r;
-    int cols = imin(inward, STRIP_COLS), rows = imin(along, STRIP_ROWS), step = along / rows;
+    /* a shake-only edge (depth 1) is sampled more sparsely: it costs a
+     * quarter of the reads and decodes */
+    int cols = imin(imin(inward, STRIP_COLS), depth + 16);
+    int rows = imin(along, depth == 1 ? STRIP_ROWS / 4 : STRIP_ROWS), step = along / rows;
     if (depth > cols)
         return r;
     for (int i = 0; i < nl; i++) {
@@ -709,14 +712,13 @@ static edge_t decide_edge(int axis, int side, int depth) {
     return r;
 }
 
-/* decide edge i (0 left, 1 right, 2 top, 3 bottom) of a W x H map; an axis
- * the view does not exceed keeps blank margins (only shake shows them) */
+/* decide edge i (0 left, 1 right, 2 top, 3 bottom) of a W x H map: the
+ * margin depth plus one cell for shake, or just that cell on an axis the
+ * view does not exceed (only shake shows it) */
 static void decide_map_edge(int i, int W, int H) {
     int axis = i >> 1, side = i & 1;
-    int m = axis ? (H < WS_H ? (WS_H - H + 1) / 2 : -1) : (W < WS_W ? (WS_W - W + 1) / 2 : -1);
-    edge_t e = { EDGE_BLANK, 0 };
-    if (m >= 0)
-        e = decide_edge(axis, side, (m + 7) / 8 + 1);  /* margin depth + one cell for shake */
+    int m = axis ? (H < WS_H ? (WS_H - H + 1) / 2 : 0) : (W < WS_W ? (WS_W - W + 1) / 2 : 0);
+    edge_t e = decide_edge(axis, side, (m + 7) / 8 + 1);
     if (memcmp(&e, &map_edge[i], sizeof e)) {
         map_edge[i] = e;
         map_generation++;              /* the margins change: renderer caches */

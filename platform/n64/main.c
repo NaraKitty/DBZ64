@@ -61,6 +61,7 @@ static struct {
     int slow_us;         /* burn this much CPU per frame (imitates slower hardware) */
     int draw_from;       /* with nodraw: draw every frame from this one on */
     int rdp_us;          /* pretend each frame keeps the RDP busy this long (needs frameskip) */
+    int stall_frame, stall_us;   /* one stall of stall_us at stall_frame (a loading hitch) */
     int profile_from;    /* start the sampling profiler at this frame */
     int frames;
     int shots[64], nshots;
@@ -106,6 +107,9 @@ static void load_test_script(void) {
             test.rdp_us = a;
         } else if (sscanf(line, "drawfrom %d", &a) == 1) {
             test.draw_from = a;
+        } else if (sscanf(line, "stall %d %d", &a, &b) == 2) {
+            test.stall_frame = a;
+            test.stall_us = b;
         } else if (sscanf(line, "slow %d", &a) == 1) {
             test.slow_us = a;
         } else if (sscanf(line, "profile %d", &a) == 1) {
@@ -455,11 +459,15 @@ __attribute__((unused)) static int frame_pace(uint64_t now) {
     int64_t late = (int64_t)(now - deadline);
     if (late > (int64_t)(4 * frame_ticks)) {
         /* a long stall (loading): don't try to catch up with it, and give
-         * the audio its headroom back */
+         * the audio its headroom back.  The silence goes through audio_push
+         * like everything else: libdragon's audio_write_* calls would leave
+         * audio_push's half-written buffer unmarked and stop the AI for good. */
+        static const int16_t zeros[16 * 2];
         deadline = now;
         late = 0;
         while (audio_get_queued_buffers() < audio_get_num_buffers() - 1)
-            audio_write_silence();
+            if (audio_push(zeros, 16, false) <= 0)
+                break;
     } else if (late < -(int64_t)frame_ticks) {
         /* never bank more than one frame of credit */
         deadline = now + frame_ticks;
@@ -514,6 +522,8 @@ void plat_frame(void) {
         keyinput = (uint16_t)(0x3FF & ~pressed);
         if (test.slow_us)
             wait_ticks(TICKS_FROM_US(test.slow_us));
+        if (test.stall_us && frame == test.stall_frame)
+            wait_ticks(TICKS_FROM_US(test.stall_us));
     }
 
     uint64_t t1 = get_ticks();
@@ -589,10 +599,11 @@ void plat_frame(void) {
                (double)TICKS_TO_US(now - t_last) / 120000.0, (double)TICKS_TO_US(acc_game) / 120000.0,
                (double)TICKS_TO_US(acc_wait) / 120000.0, (double)TICKS_TO_US(acc_draw) / 120000.0,
                (unsigned long)rom_cache_stats.misses);
-        debugf("f%d: audio blocks %lu dropped %lu queued %d; frames skipped %lu (late %lu, video busy %lu)\n",
+        debugf("f%d: audio blocks %lu dropped %lu queued %d (AI buffers %d/%d); frames skipped %lu "
+               "(late %lu, video busy %lu)\n",
                frame, (unsigned long)stat_audio_blocks, (unsigned long)stat_audio_drops,
-               (int)(a_wr - a_rd), (unsigned long)stat_skipped, (unsigned long)stat_skip_late,
-               (unsigned long)stat_skip_busy);
+               (int)(a_wr - a_rd), audio_get_queued_buffers(), audio_get_num_buffers(),
+               (unsigned long)stat_skipped, (unsigned long)stat_skip_late, (unsigned long)stat_skip_busy);
         stat_audio_blocks = stat_audio_drops = 0;
         stat_skipped = stat_skip_late = stat_skip_busy = 0;
         debugf("f%d: tlb refills %lu emulated %lu (last va %08lX pc %08lX) vram marks %lu\n", frame,
