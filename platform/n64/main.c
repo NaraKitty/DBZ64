@@ -737,20 +737,29 @@ int main(void) {
     if (test.active)
         prof_watchdog_start();
     load_save();
-    /* the ROM cache takes what is left, up to ROM_CACHE_BYTES, after the
-     * game stack, keeping ROM_HEAP_RESERVE for later allocations (the
-     * renderer's affine/bitmap raster buffers, libc) and 16KB for the
-     * cache's alignment */
+    /* the ROM cache takes what is left, up to ROM_CACHE_BYTES: first the RAM
+     * the alignment of .bss leaves unused before it (bss_gap.ld: up to 256KB,
+     * depending on the code size), then the heap after the game stack,
+     * keeping ROM_HEAP_RESERVE for later allocations (the renderer's
+     * affine/bitmap raster buffers, libc) and 16KB for the cache's alignment */
     {
+        extern char __dbz_bss_gap_start[], __dbz_bss_gap_end[];
+        uintptr_t g0 = ((uintptr_t)__dbz_bss_gap_start + 0x3FFF) & ~(uintptr_t)0x3FFF;
+        uintptr_t g1 = (uintptr_t)__dbz_bss_gap_end & ~(uintptr_t)0x3FFF;
+        int gap = g1 > g0 ? (int)(g1 - g0) : 0;
+        if (gap > ROM_CACHE_BYTES)
+            gap = ROM_CACHE_BYTES;
         heap_stats_t hs0;
         sys_get_heap_stats(&hs0);
         int cache = hs0.total - hs0.used - GAME_STACK_ALLOC - ROM_HEAP_RESERVE - 0x4000;
-        if (cache > ROM_CACHE_BYTES)
-            cache = ROM_CACHE_BYTES;
+        if (cache > ROM_CACHE_BYTES - gap)
+            cache = ROM_CACHE_BYTES - gap;
+        if (cache < 0)
+            cache = 0;
         cache &= ~0x3FFF;
-        debugf("heap: %d of %d bytes used, %d free; ROM cache %d KB\n", hs0.used, hs0.total,
-               hs0.total - hs0.used, cache / 1024);
-        rom_cache_init(cache);
+        debugf("heap: %d of %d bytes used, %d free; ROM cache %d KB (%d KB before .bss)\n", hs0.used,
+               hs0.total, hs0.total - hs0.used, (cache + gap) / 1024, gap / 1024);
+        rom_cache_init(cache, gap ? (void *)g0 : NULL, gap);
     }
     /* The game stack's top sits at offset GAME_STACK_TOP_INDEX of the
      * D-cache's 8KB index space (direct mapped): every recompiled call

@@ -11,8 +11,10 @@ typedef struct {
 
 extern rom_cache_stats_t rom_cache_stats;
 
-/* allocate 'bytes' of RDRAM for resident ROM pages (needs dfs_init first) */
-void rom_cache_init(int bytes);
+/* RDRAM for resident ROM pages (needs dfs_init first): 'bytes' allocated
+ * from the heap, plus ram_bytes at 'ram' (16KB aligned) that nothing else
+ * uses (NULL / 0 for none) */
+void rom_cache_init(int bytes, void *ram, int ram_bytes);
 
 /* load the game's hot pages (game.toml [rom] preload) while nothing else
  * runs, so play does not stall on their first use */

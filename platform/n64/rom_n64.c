@@ -15,6 +15,9 @@
  * left), so title screens and the attract demo cannot push gameplay data
  * out before play starts.  A resident page is stamped whenever it is looked
  * up, which happens on every TLB refill and slow-path read.
+ *
+ * The slots are the RAM the alignment of .bss leaves unused before it
+ * (main.c, bss_gap.ld) followed by a block from the heap.
  */
 #include <libdragon.h>
 #include <malloc.h>
@@ -28,8 +31,9 @@
 #define NPAGES    (GBA_ROM_SIZE / PAGE)
 
 static pi_addr_t rom_base;
-static uint8_t *slots;
-static int nslots;
+/* slots 0..nslots0-1 in the RAM before .bss (main.c), the rest in 'slots' */
+static uint8_t *slots0, *slots;
+static int nslots0, nslots;
 static int16_t page_slot[NPAGES];      /* -1 = not resident */
 static int16_t *slot_page;             /* -1 = free */
 static uint32_t *slot_used;            /* use stamp */
@@ -42,15 +46,23 @@ extern const int gba_rom_preload_n __attribute__((weak));
 
 rom_cache_stats_t rom_cache_stats;
 
-void rom_cache_init(int bytes) {
+static inline uint8_t *slot_mem(int s) {
+    return s < nslots0 ? slots0 + (size_t)s * PAGE : slots + (size_t)(s - nslots0) * PAGE;
+}
+
+void rom_cache_init(int bytes, void *ram, int ram_bytes) {
     rom_base = dfs_rom_addr("/rom.bin");
     if (!rom_base)
         gba_panic("rom:/rom.bin missing from the filesystem");
-    nslots = bytes / (int)PAGE;
     /* 16KB aligned so a slot can back a 16KB TLB page */
-    slots = memalign(PAGE, (size_t)nslots * PAGE);
-    if (!slots)
+    slots0 = ram;
+    nslots0 = ram && !((uintptr_t)ram & (PAGE - 1)) ? ram_bytes / (int)PAGE : 0;
+    nslots = nslots0 + bytes / (int)PAGE;
+    slots = bytes >= (int)PAGE ? memalign(PAGE, (size_t)(nslots - nslots0) * PAGE) : NULL;
+    if (bytes >= (int)PAGE && !slots)
         gba_panic("cannot allocate the ROM cache (%d bytes)", bytes);
+    if (!nslots)
+        gba_panic("no RAM for the ROM cache");
     slot_page = malloc(sizeof(int16_t) * (size_t)nslots);
     slot_used = calloc((size_t)nslots, sizeof(uint32_t));
     slot_pinned = calloc((size_t)nslots, 1);
@@ -73,7 +85,7 @@ void gba_rom_map_init(void) {
         gba_mem_map_rom_page(0x08000 + pg4, NULL);
     for (uint32_t pg = 0; pg < NPAGES; pg++)
         if (page_slot[pg] >= 0)
-            map_page(pg, slots + (size_t)page_slot[pg] * PAGE);
+            map_page(pg, slot_mem(page_slot[pg]));
 }
 
 static uint8_t *load_page(uint32_t pg) {
@@ -100,7 +112,7 @@ static uint8_t *load_page(uint32_t pg) {
 #endif
         rom_cache_stats.evictions++;
     }
-    uint8_t *p = slots + (size_t)s * PAGE;
+    uint8_t *p = slot_mem(s);
     data_cache_hit_writeback_invalidate(p, PAGE);
     dma_read(p, rom_base + pg * PAGE, PAGE);
     slot_page[s] = (int16_t)pg;
@@ -139,7 +151,7 @@ const void *rom_page16_load(uint32_t va16k, int load) {
     int s = page_slot[pg];
     if (s >= 0) {
         slot_used[s] = ++use_clock;
-        return slots + (size_t)s * PAGE;
+        return slot_mem(s);
     }
     return load ? load_page(pg) : NULL;
 }
@@ -152,7 +164,7 @@ const void *gba_rom_page_host(uint32_t a) {
     if (off >= GBA_ROM_SIZE)
         return NULL;
     int s = page_slot[off / PAGE];
-    return s >= 0 ? slots + (size_t)s * PAGE + (off & (PAGE - 1)) : NULL;
+    return s >= 0 ? slot_mem(s) + (off & (PAGE - 1)) : NULL;
 }
 #endif
 

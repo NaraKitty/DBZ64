@@ -32,6 +32,10 @@ N64_MKDFS_ROOT := $(BUILD_DIR)/filesystem
 
 include $(N64_INST)/include/n64.mk
 
+# link with BUILD_DIR/dbz.ld (made from n64.ld below) instead of n64.ld
+LINKER_SCRIPT := $(BUILD_DIR)/dbz.ld
+N64_LDFLAGS := $(subst -Tn64.ld,-T$(LINKER_SCRIPT),$(N64_LDFLAGS))
+
 RUNTIME_SRC := runtime/mem.c runtime/io.c runtime/bios.c runtime/dispatch.c \
                runtime/runtime.c runtime/interp.c runtime/ppu_soft.c runtime/native.c
 GAME_SRC := $(patsubst $(REPO)/%,%,$(wildcard $(GAME_DIR)/*.c))
@@ -75,7 +79,16 @@ $(N64_MKDFS_ROOT)/rom.bin: $(BASEROM) $(REPO)/tools/mkrom.py $(GAME_DIR)/game.h
 	python3 $(REPO)/tools/mkrom.py --game $(GAME) $(BASEROM) $@
 
 $(BUILD_DIR)/dbz.dfs: $(N64_MKDFS_ROOT)/rom.bin $(wildcard $(N64_MKDFS_ROOT)/*.txt)
-$(BUILD_DIR)/dbz.elf: $(OBJS)
+$(BUILD_DIR)/dbz.elf: $(OBJS) $(LINKER_SCRIPT)
+
+# The linker script: libdragon's n64.ld (the installed one) with guest memory
+# first in .bss and the symbols of bss_gap.ld (see there).
+$(LINKER_SCRIPT): $(N64_LIBDIR)/n64.ld $(REPO)/platform/n64/bss_gap.ld
+	@mkdir -p $(dir $@)
+	sed -e 's/^\([[:space:]]*\)\*(\.bss)[[:space:]]*$$/\1*(.bss.gba_mem)\n\1*(.bss)/' $< > $@.tmp
+	@grep -q '^[[:space:]]*\*(\.bss\.gba_mem)' $@.tmp || { echo "$<: no '*(.bss)' line to put gba_mem before"; exit 1; }
+	cat $(REPO)/platform/n64/bss_gap.ld >> $@.tmp
+	mv $@.tmp $@
 
 # cartridge header title from game.h (GAME_N64_ROM_TITLE)
 GAME_ROM_TITLE := $(shell sed -n 's/.*define GAME_N64_ROM_TITLE *\("[^"]*"\).*/\1/p' $(GAME_DIR)/game.h)
