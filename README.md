@@ -11,7 +11,7 @@
 | Game | Status |
 |---|---|
 | **Dragon Ball Z: The Legacy of Goku II** (USA) | Playable. Runs on real hardware (tested on the Analogue 3D). |
-| **Dragon Ball Z: Buu's Fury** (USA) | In progress: plays at full speed on N64 (in ares) with the RDP renderer, with the 320×240 view on field maps. Not yet tested on hardware. |
+| **Dragon Ball Z: Buu's Fury** (USA) | Playable. Full speed with the RDP renderer and the 320×240 view on field maps; runs on real hardware (tested on the Analogue 3D). |
 
 This is not an emulator running on the N64. Every ARM and Thumb instruction
 of the original cartridge (2,282 functions, 67,500 instructions for *Legacy of
@@ -90,10 +90,14 @@ The ROM you build contains your dump, so don't share it.
 - A flash cart such as SummerCart64 or EverDrive 64.
 
 **Analogue 3D:**
+- Set the video region to **NTSC** (60 Hz). With a flash cart the console
+  boots the cart's menu first, so it does not pick the region from this
+  ROM's header (which is NTSC). On PAL (50 Hz) the game still runs at full
+  speed with steady music, but only 50 frames a second are shown.
 - The built-in Expansion Pak can be switched off per game. If the ROM says
   it is missing, turn it on in the game's settings in the Library.
-- SummerCart64 is known to work well. EverDrive carts need current cart
-  firmware.
+- SummerCart64 and EverDrive 64 X7 are known to work. EverDrive carts need
+  current cart firmware.
 
 **EverDrive 64:**
 - The ROM header requests SRAM 256 Kbit saves. If your cart OS ignores
